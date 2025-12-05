@@ -1,8 +1,9 @@
-
 import ccxt
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
+import sys
+import time
 
 # ML Libraries
 from sklearn.linear_model import Ridge
@@ -208,50 +209,68 @@ def trend_signal(pred, last_price):
 
 
 # ==========================================================
-# MAIN EXECUTION
+# MAIN EXECUTION WITH LIVE UPDATES
 # ==========================================================
 symbol = "BTC/USDT"
 exchange_id = "binanceus"
 
-bars = fetch_ohlcv_bars(exchange_id, symbol, timeframe="1w", limit=224)
-summary = compute_vwap_std(bars)
-df, X, y = prepare_features(bars)
+# Approximate number of lines your output occupies
+OUTPUT_LINES = 25
 
-# Predictions
-ridge_pred = model_ridge(X, y)
-xgb_pred = model_xgboost(X, y)
-gbm_pred = model_gbm(X, y)
-kalman_pred = apply_kalman(df)
-ae_latent = model_autoencoder(X)
-gru_pred = model_gru(df)
-transformer_pred = model_transformer(df)
+while True:
+    try:
+        # Fetch latest bars
+        bars = fetch_ohlcv_bars(exchange_id, symbol, timeframe="1w", limit=224)
+        summary = compute_vwap_std(bars)
+        df, X, y = prepare_features(bars)
 
-last_close = df["close"].iloc[-1]
+        # Predictions
+        ridge_pred = model_ridge(X, y)
+        xgb_pred = model_xgboost(X, y)
+        gbm_pred = model_gbm(X, y)
+        kalman_pred = apply_kalman(df)
+        ae_latent = model_autoencoder(X)
+        gru_pred = model_gru(df)
+        transformer_pred = model_transformer(df)
 
-# Signals
-ridge_signal = trend_signal(ridge_pred, last_close)
-xgb_signal = trend_signal(xgb_pred, last_close)
-gbm_signal = trend_signal(gbm_pred, last_close)
-kalman_signal = trend_signal(kalman_pred, last_close)
-gru_signal = trend_signal(gru_pred, last_close)
-transformer_signal = trend_signal(transformer_pred, last_close)
+        last_close = df["close"].iloc[-1]
 
+        # Signals
+        ridge_signal = trend_signal(ridge_pred, last_close)
+        xgb_signal = trend_signal(xgb_pred, last_close)
+        gbm_signal = trend_signal(gbm_pred, last_close)
+        kalman_signal = trend_signal(kalman_pred, last_close)
+        gru_signal = trend_signal(gru_pred, last_close)
+        transformer_signal = trend_signal(transformer_pred, last_close)
 
-# ==========================================================
-# PRINT OUTPUT
-# ==========================================================
-print("\n=== VWAP Summary ===")
-for k, v in summary.items():
-    print(f"{k:15}: {v}")
+        # Move cursor up to overwrite previous output
+        sys.stdout.write(f"\033[{OUTPUT_LINES}A")  # Move cursor up
+        sys.stdout.flush()
 
-print("\n=== Machine Learning Forecasts ===")
-print(f"Current Close:        {last_close:.2f}\n")
+    except KeyboardInterrupt:
+        print("\nLive update stopped by user.")
+        break
+    except Exception as e:
+        print(f"\nError occurred: {e}")
+        time.sleep(3)
+        continue
 
-print(f"Ridge Regression:     {ridge_pred:.2f}   → {ridge_signal}")
-print(f"XGBoost:              {xgb_pred:.2f}   → {xgb_signal}")
-print(f"GBM:                  {gbm_pred:.2f}   → {gbm_signal}")
-print(f"Kalman Smoothed:      {kalman_pred:.2f}   → {kalman_signal}")
-print(f"GRU Forecast:         {gru_pred:.2f}   → {gru_signal}")
-print(f"Transformer Forecast: {transformer_pred:.2f}   → {transformer_signal}")
+    # Print output
+    print("\n==============================================")
+    print(f"Update at: {datetime.now(timezone.utc)} UTC")
+    print("=== VWAP Summary ===")
+    for k, v in summary.items():
+        print(f"{k:15}: {v}")
 
-print("\nAutoencoder latent factors:", ae_latent)
+    print("\n=== Machine Learning Forecasts ===")
+    print(f"Current Close:        {last_close:.2f}\n")
+    print(f"Ridge Regression:     {ridge_pred:.2f}   → {ridge_signal}")
+    print(f"XGBoost:              {xgb_pred:.2f}   → {xgb_signal}")
+    print(f"GBM:                  {gbm_pred:.2f}   → {gbm_signal}")
+    print(f"Kalman Smoothed:      {kalman_pred:.2f}   → {kalman_signal}")
+    print(f"GRU Forecast:         {gru_pred:.2f}   → {gru_signal}")
+    print(f"Transformer Forecast: {transformer_pred:.2f}   → {transformer_signal}")
+    print("\nAutoencoder latent factors:", ae_latent)
+
+    # Wait 3 seconds before next update
+    time.sleep(3)
