@@ -122,6 +122,94 @@ await asyncio.gather(
     depth_stream(),
     liquidation_stream(),
     display_loop()
+        )
+# =========================
+# ORDERBOOK AND EVENTS
+# =========================
+bids, asks = {}, {}
+large_trades = deque(maxlen=max_trades)
+liquidations = deque(maxlen=max_liquidations)
+
+# =========================
+# DATAFRAMES UTILITY
+# =========================
+def get_top_levels():
+    top_bids = sorted(bids.keys(), reverse=True)[:depth_rows]
+    top_asks = sorted(asks.keys())[:depth_rows]
+    data = []
+    for i in range(depth_rows):
+        bid_price = top_bids[i] if i < len(top_bids) else None
+        bid_qty   = bids[bid_price] if bid_price else None
+        ask_price = top_asks[i] if i < len(top_asks) else None
+        ask_qty   = asks[ask_price] if ask_price else None
+        data.append([bid_price, bid_qty, ask_price, ask_qty])
+    return pd.DataFrame(data, columns=["Bid Price","Bid Qty","Ask Price","Ask Qty"])
+
+def get_large_trades_df():
+    return pd.DataFrame(list(large_trades), columns=["Price","Side","Qty"])
+
+def get_liquidations_df():
+    return pd.DataFrame(list(liquidations), columns=["Price","Side","Qty"])
+
+# =========================
+# DEPTH STREAM
+# =========================
+async def depth_stream():
+    async with websockets.connect(WS_DEPTH_URL) as ws:
+        async for msg in ws:
+            msg=json.loads(msg)
+
+            # Update bids
+            for price, qty in msg["b"]:
+                p=float(price); q=float(qty)
+                if q == 0: bids.pop(p,None)
+                else:
+                    bids[p]=q
+                    if q >= min_trade_size:
+                        large_trades.append([p,"BUY",q])
+
+            # Update asks
+            for price, qty in msg["a"]:
+                p=float(price); q=float(qty)
+                if q == 0: asks.pop(p,None)
+                else:
+                    asks[p]=q
+                    if q >= min_trade_size:
+                        large_trades.append([p,"SELL",q])
+
+# =========================
+# LIQUIDATION STREAM
+# =========================
+async def liquidation_stream():
+    async with websockets.connect(WS_LIQ_URL) as ws:
+        async for msg in ws:
+            msg = json.loads(msg)
+            liq_price = float(msg['o']['p'])
+            liq_qty   = float(msg['o']['q'])
+            side      = "LONG" if msg['o']['S']=="SELL" else "SHORT"
+            liquidations.append([liq_price, side, liq_qty])
+
+# =========================
+# DISPLAY LOOP
+# =========================
+async def display_loop():
+    while True:
+        clear_output(wait=True)
+        print("🔹 Top Orderbook (5 levels)")
+        display(get_top_levels())
+        print("\n🔸 Large Trades (> 0.5 BTC, last 10)")
+        display(get_large_trades_df())
+        print("\n🔺 Liquidations (last 10)")
+        display(get_liquidations_df())
+        await asyncio.sleep(1)
+
+# =========================
+# RUN ALL
+# =========================
+await asyncio.gather(
+    depth_stream(),
+    liquidation_stream(),
+    display_loop()
         )    for i in range(depth_rows):
         bid_price = top_bids[i] if i < len(top_bids) else None
         bid_qty   = bids[bid_price] if bid_price else None
