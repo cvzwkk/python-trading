@@ -335,6 +335,219 @@ def average_cross_signal(hma_vals, t3_vals):
 # =========================
 # STOP-LOSS THRESHOLD
 # =========================
+stop_loss_threshold = -0.9  # close positions if unrealized PnL <= -0.1
+
+# =========================
+# LIVE STREAM LOOP
+# =========================
+async def depth_stream():
+    global balance, positions, trade_log
+    print("🔵 Complete High-Frequency Multi-Strategy Engine\n")
+    async with websockets.connect(WS_URL) as ws:
+        async for msg in ws:
+            msg=json.loads(msg)
+            # update orderbook
+            for price, qty in msg["b"]:
+                p=float(price); q=float(qty)
+                if q==0: bids.pop(p,None)
+                else: bids[p]=q
+            for price, qty in msg["a"]:
+                p=float(price); q=float(qty)
+                if q==0: asks.pop(p,None)
+                else: asks[p]=q
+            if not bids or not asks: continue
+
+            best_bid,max_best_ask = max(bids.keys()),min(asks.keys())
+            midprice = (best_bid+max_best_ask)/2
+
+            # Trend models
+            price_history.append(midprice)
+            if len(price_history)>window_size: price_history[:] = price_history[-window_size:]
+
+            preds = [
+                predict_lr(price_history),
+                predict_hma(price_history),
+                predict_kalman(price_history),
+                predict_cwma(price_history),
+                predict_dma(price_history),
+                predict_ema(price_history),
+                predict_tema(price_history),
+                predict_wma(price_history),
+                predict_smma(price_history),
+                predict_momentum(price_history),
+                predict_hzlog(price_history),
+                predict_vydia(price_history),
+                predict_parma(price_history),
+                predict_junx(price_history),
+                predict_t3(price_history),
+                predict_ichimoku(price_history)
+            ]
+            trend_final = merge_signals(preds, midprice)
+            signals_dict={f"M{i}":trend_signal(p,midprice) for i,p in enumerate(preds,1)}
+
+            # HFT features
+            ofi = order_flow_imbalance()
+            bid_p, ask_p, ratio = pressure_indicator()
+            hft_features={
+                "microprice": microprice_indicator(),
+                "ofi": ofi,
+                "spread": spread_indicator(),
+                "bid_pressure": bid_p,
+                "ask_pressure": ask_p,
+                "pressure_ratio": ratio,
+                "orderbook_slope": orderbook_slope(),
+                "imbalance": inventory_imbalance(),
+                "vpin": vpin_indicator(midprice),
+                "volatility": short_term_volatility(midprice),
+                "liquidity_shock": liquidity_shock()
+            }
+
+            # FPGA features
+            w_imb = weighted_imbalance()
+            r_ofi = rolling_ofi_sum()
+            micro_mom = micro_momentum(midprice)
+            cancel_r = cancellation_ratio(msg)
+            p_skew = price_skew()
+            fpga_features = {
+                "weighted_imbalance": (w_imb, trend_signal(w_imb,0)),
+                "rolling_ofi": (r_ofi, trend_signal(r_ofi,0)),
+                "micro_momentum": (micro_mom, trend_signal(micro_mom,0)),
+                "cancel_ratio": (cancel_r, trend_signal(cancel_r,0)),
+                "price_skew": (p_skew, trend_signal(p_skew,0))
+            }
+
+            # River online prediction
+            next_pred,next_trend = update_river_models(midprice,{k:v[0] for k,v in fpga_features.items()})
+
+            # Cache
+            snapshot_cache.append({
+                "midprice": midprice,
+                **hft_features,
+                **{k:v[0] for k,v in fpga_features.items()}
+            })
+
+            # HMA + T3 crossing
+            hma_val = predict_hma(price_history)
+            t3_val  = predict_t3(price_history)
+            hma_values.append(hma_val)
+            t3_values.append(t3_val)
+            cross_signal = average_cross_signal(hma_values, t3_values)
+
+            # =========================
+            # MULTI-TRADING LOGIC
+            # =========================
+            # Trend Models M1-M16
+            for name, signal in signals_dict.items():
+                if signal=="BULLISH 📈":
+                    if positions.get(name,{}).get("type")!="LONG":
+                        if positions.get(name,{}).get("type")=="SHORT":
+                            pnl = positions[name]["entry"] - midprice
+                            balance += pnl
+                            trade_log.append({"strategy":name,"side":"CLOSE SHORT","price":midprice,"pnl":pnl,"balance":balance})
+                        positions[name] = {"type":"LONG","entry":midprice}
+                        trade_log.append({"strategy":name,"side":"OPEN LONG","price":midprice,"balance":balance})
+                elif signal=="BEARISH 📉":
+                    if positions.get(name,{}).get("type")!="SHORT":
+                        if positions.get(name,{}).get("type")=="LONG":
+                            pnl = midprice - positions[name]["entry"]
+                            balance += pnl
+                            trade_log.append({"strategy":name,"side":"CLOSE LONG","price":midprice,"pnl":pnl,"balance":balance})
+                        positions[name] = {"type":"SHORT","entry":midprice}
+                        trade_log.append({"strategy":name,"side":"OPEN SHORT","price":midprice,"balance":balance})
+
+            # HMA+T3 crossing as separate strategy
+            hma_name = "HMA+T3"
+            if cross_signal=="BUY 🟢":
+                if positions.get(hma_name,{}).get("type")!="LONG":
+                    if positions.get(hma_name,{}).get("type")=="SHORT":
+                        pnl = positions[hma_name]["entry"] - midprice
+                        balance += pnl
+                        trade_log.append({"strategy":hma_name,"side":"CLOSE SHORT","price":midprice,"pnl":pnl,"balance":balance})
+                    positions[hma_name] = {"type":"LONG","entry":midprice}
+                    trade_log.append({"strategy":hma_name,"side":"OPEN LONG","price":midprice,"balance":balance})
+            elif cross_signal=="SELL 🔴":
+                if positions.get(hma_name,{}).get("type")!="SHORT":
+                    if positions.get(hma_name,{}).get("type")=="LONG":
+                        pnl = midprice - positions[hma_name]["entry"]
+                        balance += pnl
+                        trade_log.append({"strategy":hma_name,"side":"CLOSE LONG","price":midprice,"pnl":pnl,"balance":balance})
+                    positions[hma_name] = {"type":"SHORT","entry":midprice}
+                    trade_log.append({"strategy":hma_name,"side":"OPEN SHORT","price":midprice,"balance":balance})
+
+            # =========================
+            # STOP-LOSS CHECK
+            # =========================
+            for strat, pos in list(positions.items()):
+                unrealized = (midprice - pos["entry"]) if pos["type"] == "LONG" else (pos["entry"] - midprice)
+                if unrealized <= stop_loss_threshold:
+                    pnl = unrealized
+                    balance += pnl
+                    side = "CLOSE LONG" if pos["type"] == "LONG" else "CLOSE SHORT"
+                    trade_log.append({"strategy": strat, "side": side, "price": midprice, "pnl": pnl, "balance": balance})
+                    print(f"⚠️ Stop-Loss Triggered: {strat} {side} @ {midprice:.2f} | PnL: {pnl:.2f} | Balance: {balance:.2f}")
+                    positions.pop(strat)
+
+            # =========================
+            # PRINT OUTPUT
+            # =========================
+            now=datetime.utcnow()
+            print("\n⏱",now,"UTC")
+            print("⭐ Trend Models Signals:", trend_final)
+            for k,v in signals_dict.items(): print(f"   {k:7}: {v}")
+            print("⭐ HMA + T3 Crossing Signal:", cross_signal)
+            print(f"⭐ Balance: {balance:.2f}")
+            print("⭐ Current Positions:")
+            for strat,pos in positions.items():
+                unrealized = (midprice-pos["entry"]) if pos["type"]=="LONG" else (pos["entry"]-midprice)
+                print(f"   {strat:10}: {pos['type']} @ {pos['entry']:.2f} | Unrealized PnL: {unrealized:.2f}")
+            print("⭐ Last Trades:")
+            for t in trade_log[-5:]:
+                print(f"   {t['strategy']:10} {t['side']:15} @ {t['price']:.2f} | PnL: {t.get('pnl',0):.2f}_bids=sorted(bids.keys(),reverse=True)
+    top_asks=sorted(asks.keys())
+    available_levels=min(depth,len(top_bids),len(top_asks))
+    if available_levels==0: return 0
+    bid_vol=sum([bids[top_bids[i]] for i in range(available_levels)])
+    ask_vol=sum([asks[top_asks[i]] for i in range(available_levels)])
+    return (bid_vol-ask_vol)/(bid_vol+ask_vol+1e-9)
+
+# =========================
+# RIVER ONLINE MODELS
+# =========================
+price_scaler = preprocessing.StandardScaler()
+online_lr = linear_model.LinearRegression()
+online_log = linear_model.LogisticRegression()
+
+def update_river_models(midprice, features_dict):
+    x = {**features_dict, "midprice": midprice}
+    price_scaler.learn_one(x)
+    x_scaled = price_scaler.transform_one(x)
+    y_pred = online_lr.predict_one(x_scaled) or midprice
+    online_lr.learn_one(x_scaled, midprice)
+    trend = 1 if midprice > y_pred else -1 if midprice < y_pred else 0
+    y_class = {1:"BULLISH 📈", -1:"BEARISH 📉", 0:"NEUTRAL ➖"}
+    online_log.learn_one(x_scaled, trend)
+    return y_pred, y_class[trend]
+
+# =========================
+# HMA + T3 CROSSING STRATEGY
+# =========================
+hma_values = deque(maxlen=100)
+t3_values  = deque(maxlen=100)
+
+def average_cross_signal(hma_vals, t3_vals):
+    if len(hma_vals) < 2 or len(t3_vals) < 2:
+        return "NEUTRAL ➖"
+    hma_prev, hma_curr = hma_vals[-2], hma_vals[-1]
+    t3_prev, t3_curr = t3_vals[-2], t3_vals[-1]
+    if hma_prev < t3_prev and hma_curr > t3_curr:
+        return "BUY 🟢"
+    elif hma_prev > t3_prev and hma_curr < t3_curr:
+        return "SELL 🔴"
+    return "NEUTRAL ➖"
+
+# =========================
+# STOP-LOSS THRESHOLD
+# =========================
 stop_loss_threshold = -0.1  # close positions if unrealized PnL <= -0.1
 
 # =========================
