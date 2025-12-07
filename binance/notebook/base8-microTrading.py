@@ -2,7 +2,15 @@
 # =========================
 # INSTALL DEPENDENCIES
 # =========================
-
+!pip install river
+!pip install pandas==2.2.2
+!pip install python-binance
+!pip install websockets
+!pip install aiohttp
+!pip install nest_asyncio
+!pip install matplotlib
+!pip install seaborn
+!pip install pykalman
 # =========================
 # IMPORTS
 # =========================
