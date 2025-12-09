@@ -634,6 +634,13 @@ def fibonacci_signal(midprice, levels):
     else:
         return "NEUTRAL ➖"
 
+def invert_signal(signal):
+    if signal in ["BUY 🟢", "BULLISH 📈"]:
+        return "SELL 🔴"
+    elif signal in ["SELL 🔴", "BEARISH 📉"]:
+        return "BUY 🟢"
+    return "NEUTRAL ➖"
+
 # =========================
 # LIVE STREAM LOOP WITH SIGNAL INVERSION
 # =========================
@@ -699,13 +706,7 @@ async def depth_stream():
                  predict_burg_ar(price_history, order=6),
                  predict_median_trend(price_history),
                  predict_envelope(price_history)
-           ]
-
-# put some in the first set and some in the second set (example)
-preds.extend(preds_extra[:4])        # add 4 into the main group
-preds2.extend(preds_extra[4:])       # remaining into the second group
-
-                
+                    
             ]
 
             # trend summary uses first group (preds)
