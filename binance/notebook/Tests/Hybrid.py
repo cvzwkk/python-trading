@@ -307,6 +307,152 @@ def predict_rls_trend(prices):
         return float(prices[-1])
 
 # =========================
+# MORE EXOTIC MODELS (paste under your ADDITIONAL EXOTIC MODELS)
+# =========================
+
+import math
+from scipy.signal import savgol_filter
+
+def predict_savgol(prices, window=9, polyorder=3, horizon=1):
+    """S-G denoise + last-slope extrapolation. Fast and robust to spikes."""
+    n = len(prices)
+    if n < 3:
+        return prices[-1]
+    # ensure odd window and <= n
+    w = min(window, n if n % 2 == 1 else n-1)
+    if w < 3:
+        return prices[-1]
+    try:
+        filt = savgol_filter(prices[-w:], w, min(polyorder, w-1))
+        slope = filt[-1] - filt[-2]
+        return float(filt[-1] + slope * horizon)
+    except Exception:
+        return float(prices[-1])
+
+def predict_local_poly(prices, window=12, degree=2, horizon=1):
+    """Fit low-degree polynomial to last `window` points and extrapolate."""
+    n = len(prices)
+    if n < degree + 2:
+        return prices[-1]
+    w = min(window, n)
+    y = np.array(prices[-w:])
+    x = np.arange(w).astype(float)
+    # shift x so poly is numerically stable (predict next index = w)
+    x_shift = x - x.mean()
+    coeffs = np.polyfit(x_shift, y, min(degree, w-1))
+    poly = np.poly1d(coeffs)
+    next_x = (w) - x.mean()
+    return float(poly(next_x))
+
+def predict_holt(prices, alpha=0.4, beta=0.2, horizon=1):
+    """Simple Holt's linear trend (double exp smoothing) 1-step forecast."""
+    n = len(prices)
+    if n < 3:
+        return prices[-1]
+    s = prices[0]
+    b = prices[1] - prices[0]
+    for i in range(1, n):
+        last = s
+        s = alpha * prices[i] + (1 - alpha) * (s + b)
+        b = beta * (s - last) + (1 - beta) * b
+    return float(s + b * horizon)
+
+def predict_lms_online(prices, taps=6, mu=0.01):
+    """Simple batch LMS/SGD linear predictor using last `taps` values.
+       Very cheap and adaptive: fits weights to minimize last-window squared error then forecasts 1-step."""
+    n = len(prices)
+    if n <= taps:
+        return prices[-1]
+    # prepare X matrix of lagged values and y vector
+    X = []
+    y = []
+    for i in range(taps, n):
+        X.append(prices[i-taps:i][::-1])  # most recent first
+        y.append(prices[i])
+    X = np.array(X)
+    y = np.array(y)
+    # initialize weights as zeros and do a few LMS passes (cheap)
+    w = np.zeros(taps)
+    for xi, yi in zip(X, y):
+        pred = w.dot(xi)
+        e = yi - pred
+        w = w + mu * e * xi
+    last_row = np.array(prices[-taps:][::-1])
+    return float(w.dot(last_row))
+
+def predict_burg_ar(prices, order=6):
+    """Burg algorithm to estimate AR coefficients then 1-step forecast.
+       Order should be small for 1s timeframe (3..8)."""
+    x = np.array(prices)
+    n = len(x)
+    if n <= 2 or order < 1:
+        return float(prices[-1])
+    m = min(order, n-1)
+    # initialize
+    ef = x.copy()
+    eb = x.copy()
+    a = np.zeros(m+1)
+    a[0] = 1.0
+    den = np.dot(ef, ef)
+    # reflection coefficients
+    coeffs = np.zeros(m)
+    for k in range(m):
+        # compute numerator and denominator
+        num = -2.0 * np.dot(ef[k+1:], eb[k:n-1])
+        den = np.dot(ef[k+1:], ef[k+1:]) + np.dot(eb[k:n-1], eb[k:n-1])
+        if abs(den) < 1e-12:
+            break
+        gamma = num / den
+        coeffs[k] = gamma
+        # update forward/backward errors
+        ef_next = ef.copy()
+        eb_next = eb.copy()
+        ef_next[k+1:n] = ef[k+1:n] + gamma * eb[k:n-1]
+        eb_next[k+1:n] = eb[k+1:n] + gamma * ef[k+1:n]
+        ef = ef_next
+        eb = eb_next
+    # convert reflection coefficients to AR coefs (Levinson-Durbin style)
+    ar = np.array([0.0]*m)
+    for i in range(m):
+        k = coeffs[i]
+        ar_prev = ar[:i].copy()
+        ar[:i] = ar_prev - k * ar_prev[::-1]
+        ar[i] = k
+    # forecast using last m samples: x_hat = -sum(ar * x_{t - i - 1})
+    last_vals = x[-m:][::-1] if m>0 else np.array([x[-1]])
+    forecast = -np.dot(ar, last_vals) + x[-1]  # add last to reduce bias
+    return float(forecast)
+
+def predict_median_trend(prices, window=10, horizon=1):
+    """Take median of local slopes inside window and extrapolate."""
+    n = len(prices)
+    if n < 3:
+        return prices[-1]
+    w = min(window, n-1)
+    slopes = []
+    arr = np.array(prices[-(w+1):])
+    for i in range(len(arr)-1):
+        slopes.append(arr[i+1] - arr[i])
+    med_slope = float(np.median(slopes))
+    return float(prices[-1] + med_slope * horizon)
+
+def predict_envelope(prices, window=12):
+    """Use local min/max envelope bias to create a tiny projected movement.
+       Good when price is trapped in micro-range and you want envelope push."""
+    n = len(prices)
+    if n < 6:
+        return prices[-1]
+    w = min(window, n)
+    seg = np.array(prices[-w:])
+    local_max = np.max(seg)
+    local_min = np.min(seg)
+    center = (local_max + local_min) / 2.0
+    bias = (seg[-1] - center) / (local_max - local_min + 1e-9)
+    # bias in [-1,1] scaled to a small step
+    step = (local_max - local_min) * 0.15
+    return float(seg[-1] + bias * step)
+
+# =========================
 # HFT INDICATORS
 # =========================
 def microprice_indicator():
@@ -544,7 +690,22 @@ async def depth_stream():
                  predict_macd_midprice(price_history),
                  predict_median_filter(price_history, period=7),
                  predict_entropy_weighted(price_history, period=20),
-                 predict_rls_trend(price_history)              
+                 predict_rls_trend(price_history)   
+                 # New Models v1
+                 predict_savgol(price_history),
+                 predict_local_poly(price_history),
+                 predict_holt(price_history),
+                 predict_lms_online(price_history),
+                 predict_burg_ar(price_history, order=6),
+                 predict_median_trend(price_history),
+                 predict_envelope(price_history)
+           ]
+
+# put some in the first set and some in the second set (example)
+preds.extend(preds_extra[:4])        # add 4 into the main group
+preds2.extend(preds_extra[4:])       # remaining into the second group
+
+                
             ]
 
             # trend summary uses first group (preds)
