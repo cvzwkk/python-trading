@@ -2,6 +2,29 @@
 import requests
 import time
 
+def get_block_total_btc(block_height):
+    # Get block hash from height
+    block_hash = requests.get(f"https://blockstream.info/api/block-height/{block_height}").text
+
+    # Get block details
+    block = requests.get(f"https://blockstream.info/api/block/{block_hash}").json()
+
+    # Get transactions in block
+    txs = requests.get(f"https://blockstream.info/api/block/{block_hash}/txs").json()
+
+    # Coinbase transaction is the first one
+    coinbase_tx = txs[0]
+
+    # Total BTC = sum of outputs of coinbase transaction
+    total_sats = sum(vout['value'] for vout in coinbase_tx['vout'])
+    total_btc = total_sats / 1e8
+
+    return total_btc
+
+# Example: latest block
+latest_height = int(requests.get("https://blockstream.info/api/blocks/tip/height").text)
+total_btc = get_block_total_btc(latest_height)
+
 BASE = "https://mempool.space/api"
 
 def get_mempool_stats():
@@ -27,6 +50,7 @@ def main():
     fees = get_recommended_fees()
 
     print("\n--- MEMPOOL STATS ---")
+    print(f"Total BTC in block {latest_height}: {total_btc} BTC")
     print(f"Unconfirmed TXs     : {stats.get('count')}")
     print(f"Mempool Size (vB)   : {stats.get('vsize')}")
     print(f"Mempool Total Fees  : {stats.get('total_fee')} sat")
