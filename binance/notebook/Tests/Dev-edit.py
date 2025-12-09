@@ -537,6 +537,12 @@ def fibonacci_signal(midprice, levels):
     else:
         return "NEUTRAL ➖"
 
+def invert_signal(signal):
+    if signal in ["BUY 🟢", "BULLISH 📈"]:
+        return "SELL 🔴"
+    elif signal in ["SELL 🔴", "BEARISH 📉"]:
+        return "BUY 🟢"
+    return "NEUTRAL ➖"
 
 # =========================
 # LIVE STREAM LOOP WITH SIGNAL INVERSION
