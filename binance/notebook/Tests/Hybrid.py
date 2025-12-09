@@ -697,7 +697,7 @@ async def depth_stream():
                  predict_macd_midprice(price_history),
                  predict_median_filter(price_history, period=7),
                  predict_entropy_weighted(price_history, period=20),
-                 predict_rls_trend(price_history)   
+                 predict_rls_trend(price_history),
                  # New Models v1
                  predict_savgol(price_history),
                  predict_local_poly(price_history),
