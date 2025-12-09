@@ -60,8 +60,8 @@ trade_log = []
 # UTILITY FUNCTIONS
 # =========================
 def trend_signal(pred, last_price):
-    if pred > last_price: return "BULLISH 📈"
-    elif pred < last_price: return "BEARISH 📉"
+    if pred > last_price: return "BUY 🟢"
+    elif pred < last_price: return "SELL 🔴"
     return "NEUTRAL ➖"
 
 def fetch_last_price(symbol):
@@ -71,8 +71,8 @@ def fetch_last_price(symbol):
 def merge_signals(preds, last_price):
     signals = [1 if p>last_price else -1 if p<last_price else 0 for p in preds]
     score = sum(signals)
-    if score>0: return "BULLISH 📈"
-    elif score<0: return "BEARISH 📉"
+    if score>0: return "BUY 🟢"
+    elif score<0: return "SELL 🔴"
     return "NEUTRAL ➖"
 
 # =========================
