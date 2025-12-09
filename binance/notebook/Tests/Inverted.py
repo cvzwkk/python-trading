@@ -333,12 +333,6 @@ def average_cross_signal(hma_vals, t3_vals):
         return "SELL 🔴"
     return "NEUTRAL ➖"
 
-## =========================
-# AUTO-CLOSE THRESHOLDS
-# =========================
-stop_loss_threshold = -0.1    # PnL threshold for stop-loss
-take_profit_threshold = 0.2   # PnL threshold for take-profit
-
 # =========================
 # =========================
 # FIBONACCI TREND MODULE
@@ -391,17 +385,83 @@ def fibonacci_signal(midprice, levels):
 
 
 # =========================
-# LIVE STREAM LOOP WITH SIGNAL INVERSION
+# (Place the rest of your code above unchanged: imports, models, indicators, etc.)
+# =========================
+
+# =========================
+# AUTO-CLOSE PARAMETERS (improved)
+# =========================
+# You can set thresholds as absolute PnL values (same units as price)
+stop_loss_threshold_abs = -0.1    # example: -0.1 USD (or -0.1 in pricing units)
+take_profit_threshold_abs = 0.2   # example: +0.2 USD
+
+# Or set thresholds as percent of entry (more common). Use None to disable.
+stop_loss_threshold_pct = -0.001   # -0.1% default example (negative means loss)
+take_profit_threshold_pct = 0.002  # +0.2% default example
+
+# When True, if a position hits close condition we will close immediately and
+# skip opening a new position for that strategy during the same tick (aggressive)
+aggressive_exit = True
+
+# =========================
+# Helper: unified check-and-close function (fast/instant)
+# =========================
+def compute_unrealized(pos, midprice):
+    """Return unrealized PnL (absolute) and percent change relative to entry.
+       For LONG: pnl = mid - entry, pct = (mid-entry)/entry
+       For SHORT: pnl = entry - mid, pct = (entry-mid)/entry
+    """
+    if pos["type"] == "LONG":
+        pnl = midprice - pos["entry"]
+        pct = pnl / (pos["entry"] + 1e-12)
+    else:  # SHORT
+        pnl = pos["entry"] - midprice
+        pct = pnl / (pos["entry"] + 1e-12)
+    return float(pnl), float(pct)
+
+def should_close(pos, midprice):
+    """Decide whether to close based on absolute or percent thresholds."""
+    pnl_abs, pct = compute_unrealized(pos, midprice)
+
+    # check absolute thresholds first (if set)
+    if stop_loss_threshold_abs is not None and pnl_abs <= stop_loss_threshold_abs:
+        return True, pnl_abs
+    if take_profit_threshold_abs is not None and pnl_abs >= take_profit_threshold_abs:
+        return True, pnl_abs
+
+    # check percent thresholds next (if set)
+    if stop_loss_threshold_pct is not None and pct <= stop_loss_threshold_pct:
+        # convert pct back to price units for logging consistency
+        pnl_price_equiv = pct * pos["entry"]
+        return True, pnl_price_equiv
+    if take_profit_threshold_pct is not None and pct >= take_profit_threshold_pct:
+        pnl_price_equiv = pct * pos["entry"]
+        return True, pnl_price_equiv
+
+    return False, 0.0
+
+def close_position_immediate(strategy_name, pos, midprice):
+    """Close the position immediately, update balance and logs."""
+    global balance
+    pnl_abs, _ = compute_unrealized(pos, midprice)
+    balance += pnl_abs
+    side = "CLOSE LONG" if pos["type"] == "LONG" else "CLOSE SHORT"
+    trade_log.append({"strategy": strategy_name, "side": side, "price": midprice, "pnl": pnl_abs, "balance": balance})
+    positions.pop(strategy_name, None)
+    return pnl_abs
+
+# =========================
+# LIVE STREAM LOOP WITH FASTER AUTO-CLOSE
 # =========================
 async def depth_stream():
     global balance, positions, trade_log
-    print("🔵 Inverted High-Frequency Multi-Strategy Engine with Fibonacci 📊\n")
+    print("🔵 Inverted High-Frequency Multi-Strategy Engine with Immediate Auto-Close 📊\n")
 
     async with websockets.connect(WS_URL) as ws:
         async for msg in ws:
             msg = json.loads(msg)
 
-            # --- update orderbook
+            # --- update orderbook (unchanged)
             for price, qty in msg["b"]:
                 p, q = float(price), float(qty)
                 if q == 0: bids.pop(p, None)
@@ -415,12 +475,27 @@ async def depth_stream():
             best_bid, best_ask = max(bids.keys()), min(asks.keys())
             midprice = (best_bid + best_ask) / 2
 
-            # --- update price history
+            # --- update price history (unchanged)
             price_history.append(midprice)
             if len(price_history) > window_size:
                 price_history[:] = price_history[-window_size:]
 
-            # --- trend model predictions
+            # =========================
+            # IMMEDIATE AUTO-CLOSE CHECK (runs BEFORE opening new positions)
+            # This ensures positions that already reached thresholds close as soon as possible
+            # =========================
+            strategies_closed_this_tick = set()
+            for strat, pos in list(positions.items()):
+                close_flag, pnl_val = should_close(pos, midprice)
+                if close_flag:
+                    pnl_closed = close_position_immediate(strat, pos, midprice)
+                    strategies_closed_this_tick.add(strat)
+                    # print immediate closure
+                    trade_log.append({"strategy": strat, "side": "AUTO-CLOSE", "price": midprice, "pnl": pnl_closed, "balance": balance})
+
+            # =========================
+            # trend model predictions (unchanged)
+            # =========================
             preds = [
                 predict_lr(price_history),
                 predict_hma(price_history),
@@ -439,10 +514,17 @@ async def depth_stream():
                 predict_t3(price_history),
                 predict_ichimoku(price_history)
             ]
-            trend_final = merge_signals(preds, midprice)
-            signals_dict = {f"M{i}": invert_signal(trend_signal(p, midprice)) for i, p in enumerate(preds, 1)}
 
-            # --- HFT & FPGA features
+            # trend summary uses first group (preds)
+            trend_final = merge_signals(preds, midprice)
+
+            # FIRST SET → INVERTED SIGNALS (M1..)
+            signals_dict = {
+                f"M{i}": invert_signal(trend_signal(p, midprice))
+                for i, p in enumerate(preds, 1)
+            }
+
+            # --- HFT & FPGA features (unchanged)
             ofi = order_flow_imbalance()
             bid_p, ask_p, ratio = pressure_indicator()
             hft_features = {
@@ -472,34 +554,49 @@ async def depth_stream():
                 "price_skew": (p_skew, trend_signal(p_skew, 0))
             }
 
-            # --- River online prediction
+            # --- River online prediction (unchanged)
             next_pred, next_trend = update_river_models(midprice, {k: v[0] for k, v in fpga_features.items()})
 
-            # --- Cache snapshot
+            # --- Cache snapshot (unchanged)
             snapshot_cache.append({
                 "midprice": midprice,
                 **hft_features,
                 **{k: v[0] for k, v in fpga_features.items()}
             })
 
-            # --- HMA + T3 crossing
+            # --- HMA + T3 crossing (unchanged)
             hma_val = predict_hma(price_history)
             t3_val = predict_t3(price_history)
             hma_values.append(hma_val)
             t3_values.append(t3_val)
             cross_signal = invert_signal(average_cross_signal(hma_values, t3_values))
 
-            # --- Fibonacci trend
+            # --- Fibonacci trend (unchanged)
             fib_levels = fibonacci_levels(price_history, lookback=30)
             fib_signal = invert_signal(fibonacci_signal(midprice, fib_levels))
 
             # =========================
-            # MULTI-STRATEGY TRADING LOGIC
+            # MULTI-STRATEGY TRADING LOGIC (OPEN/CLOSE) with immediate-close protection
             # =========================
-            # Trend Models M1-M16
+
+            # A) Trend Models M1.. (INVERTED signals_dict)
             for name, signal in signals_dict.items():
+                # if this strategy was auto-closed this tick and aggressive_exit is on, skip reopening it
+                if aggressive_exit and name in strategies_closed_this_tick:
+                    continue
+
                 if signal == "SELL 🔴":
-                    # open LONG becomes SHORT
+                    # open LONG becomes SHORT (inverted behavior)
+                    curr_type = positions.get(name, {}).get("type")
+                    # If there is an existing position check immediate-close again (safety)
+                    if curr_type is not None:
+                        close_flag, _ = should_close(positions[name], midprice)
+                        if close_flag:
+                            close_position_immediate(name, positions[name], midprice)
+                            strategies_closed_this_tick.add(name)
+                            if aggressive_exit:
+                                continue  # skip reopening this tick
+
                     if positions.get(name, {}).get("type") != "SHORT":
                         if positions.get(name, {}).get("type") == "LONG":
                             pnl = midprice - positions[name]["entry"]
@@ -507,8 +604,18 @@ async def depth_stream():
                             trade_log.append({"strategy": name, "side": "CLOSE LONG", "price": midprice, "pnl": pnl, "balance": balance})
                         positions[name] = {"type": "SHORT", "entry": midprice}
                         trade_log.append({"strategy": name, "side": "OPEN SHORT", "price": midprice, "balance": balance})
+
                 elif signal == "BUY 🟢":
                     # open SHORT becomes LONG
+                    curr_type = positions.get(name, {}).get("type")
+                    if curr_type is not None:
+                        close_flag, _ = should_close(positions[name], midprice)
+                        if close_flag:
+                            close_position_immediate(name, positions[name], midprice)
+                            strategies_closed_this_tick.add(name)
+                            if aggressive_exit:
+                                continue
+
                     if positions.get(name, {}).get("type") != "LONG":
                         if positions.get(name, {}).get("type") == "SHORT":
                             pnl = positions[name]["entry"] - midprice
@@ -517,75 +624,115 @@ async def depth_stream():
                         positions[name] = {"type": "LONG", "entry": midprice}
                         trade_log.append({"strategy": name, "side": "OPEN LONG", "price": midprice, "balance": balance})
 
-            # HMA+T3 crossing
+            # B) Trend Models N1.. (NON-INVERTED signals_dict_normal) — same protection
+            for name, signal in signals_dict_normal.items():
+                if aggressive_exit and name in strategies_closed_this_tick:
+                    continue
+
+                if signal == "BUY 🟢":
+                    curr_type = positions.get(name, {}).get("type")
+                    if curr_type is not None:
+                        close_flag, _ = should_close(positions[name], midprice)
+                        if close_flag:
+                            close_position_immediate(name, positions[name], midprice)
+                            strategies_closed_this_tick.add(name)
+                            if aggressive_exit:
+                                continue
+
+                    if positions.get(name, {}).get("type") != "LONG":
+                        if positions.get(name, {}).get("type") == "SHORT":
+                            pnl = positions[name]["entry"] - midprice
+                            balance += pnl
+                            trade_log.append({"strategy": name, "side": "CLOSE SHORT", "price": midprice, "pnl": pnl, "balance": balance})
+                        positions[name] = {"type": "LONG", "entry": midprice}
+                        trade_log.append({"strategy": name, "side": "OPEN LONG", "price": midprice, "balance": balance})
+
+                elif signal == "SELL 🔴":
+                    curr_type = positions.get(name, {}).get("type")
+                    if curr_type is not None:
+                        close_flag, _ = should_close(positions[name], midprice)
+                        if close_flag:
+                            close_position_immediate(name, positions[name], midprice)
+                            strategies_closed_this_tick.add(name)
+                            if aggressive_exit:
+                                continue
+
+                    if positions.get(name, {}).get("type") != "SHORT":
+                        if positions.get(name, {}).get("type") == "LONG":
+                            pnl = midprice - positions[name]["entry"]
+                            balance += pnl
+                            trade_log.append({"strategy": name, "side": "CLOSE LONG", "price": midprice, "pnl": pnl, "balance": balance})
+                        positions[name] = {"type": "SHORT", "entry": midprice}
+                        trade_log.append({"strategy": name, "side": "OPEN SHORT", "price": midprice, "balance": balance})
+
+            # HMA+T3 crossing (keeps inverted behaviour) — same immediate-close protection
             hma_name = "HMA+T3"
-            if cross_signal == "BUY 🟢":
-                if positions.get(hma_name, {}).get("type") != "SHORT":
-                    if positions.get(hma_name, {}).get("type") == "LONG":
-                        pnl = midprice - positions[hma_name]["entry"]
-                        balance += pnl
-                        trade_log.append({"strategy": hma_name, "side": "CLOSE LONG", "price": midprice, "pnl": pnl, "balance": balance})
-                    positions[hma_name] = {"type": "SHORT", "entry": midprice}
-                    trade_log.append({"strategy": hma_name, "side": "OPEN SHORT", "price": midprice, "balance": balance})
-            elif cross_signal == "SELL 🔴":
-                if positions.get(hma_name, {}).get("type") != "LONG":
-                    if positions.get(hma_name, {}).get("type") == "SHORT":
-                        pnl = positions[hma_name]["entry"] - midprice
-                        balance += pnl
-                        trade_log.append({"strategy": hma_name, "side": "CLOSE SHORT", "price": midprice, "pnl": pnl, "balance": balance})
-                    positions[hma_name] = {"type": "LONG", "entry": midprice}
-                    trade_log.append({"strategy": hma_name, "side": "OPEN LONG", "price": midprice, "balance": balance})
+            if aggressive_exit and hma_name in strategies_closed_this_tick:
+                pass
+            else:
+                if cross_signal == "BUY 🟢":
+                    if positions.get(hma_name, {}).get("type") != "SHORT":
+                        if positions.get(hma_name, {}).get("type") == "LONG":
+                            pnl = midprice - positions[hma_name]["entry"]
+                            balance += pnl
+                            trade_log.append({"strategy": hma_name, "side": "CLOSE LONG", "price": midprice, "pnl": pnl, "balance": balance})
+                        positions[hma_name] = {"type": "SHORT", "entry": midprice}
+                        trade_log.append({"strategy": hma_name, "side": "OPEN SHORT", "price": midprice, "balance": balance})
+                elif cross_signal == "SELL 🔴":
+                    if positions.get(hma_name, {}).get("type") != "LONG":
+                        if positions.get(hma_name, {}).get("type") == "SHORT":
+                            pnl = positions[hma_name]["entry"] - midprice
+                            balance += pnl
+                            trade_log.append({"strategy": hma_name, "side": "CLOSE SHORT", "price": midprice, "pnl": pnl, "balance": balance})
+                        positions[hma_name] = {"type": "LONG", "entry": midprice}
+                        trade_log.append({"strategy": hma_name, "side": "OPEN LONG", "price": midprice, "balance": balance})
 
-            # Fibonacci strategy
+            # Fibonacci strategy (keeps inverted behaviour and protection)
             fib_name = "FIB"
-            if fib_signal in ["BUY 🟢", "BULLISH 📈"]:
-                if positions.get(fib_name, {}).get("type") != "SHORT":
-                    if positions.get(fib_name, {}).get("type") == "LONG":
-                        pnl = midprice - positions[fib_name]["entry"]
-                        balance += pnl
-                        trade_log.append({"strategy": fib_name, "side": "CLOSE LONG", "price": midprice, "pnl": pnl, "balance": balance})
-                    positions[fib_name] = {"type": "SHORT", "entry": midprice}
-                    trade_log.append({"strategy": fib_name, "side": "OPEN SHORT", "price": midprice, "balance": balance})
-            elif fib_signal in ["SELL 🔴", "BEARISH 📉"]:
-                if positions.get(fib_name, {}).get("type") != "LONG":
-                    if positions.get(fib_name, {}).get("type") == "SHORT":
-                        pnl = positions[fib_name]["entry"] - midprice
-                        balance += pnl
-                        trade_log.append({"strategy": fib_name, "side": "CLOSE SHORT", "price": midprice, "pnl": pnl, "balance": balance})
-                    positions[fib_name] = {"type": "LONG", "entry": midprice}
-                    trade_log.append({"strategy": fib_name, "side": "OPEN LONG", "price": midprice, "balance": balance})
+            if aggressive_exit and fib_name in strategies_closed_this_tick:
+                pass
+            else:
+                if fib_signal in ["BUY 🟢", "BULLISH 📈"]:
+                    if positions.get(fib_name, {}).get("type") != "SHORT":
+                        if positions.get(fib_name, {}).get("type") == "LONG":
+                            pnl = midprice - positions[fib_name]["entry"]
+                            balance += pnl
+                            trade_log.append({"strategy": fib_name, "side": "CLOSE LONG", "price": midprice, "pnl": pnl, "balance": balance})
+                        positions[fib_name] = {"type": "SHORT", "entry": midprice}
+                        trade_log.append({"strategy": fib_name, "side": "OPEN SHORT", "price": midprice, "balance": balance})
+                elif fib_signal in ["SELL 🔴", "BEARISH 📉"]:
+                    if positions.get(fib_name, {}).get("type") != "LONG":
+                        if positions.get(fib_name, {}).get("type") == "SHORT":
+                            pnl = positions[fib_name]["entry"] - midprice
+                            balance += pnl
+                            trade_log.append({"strategy": fib_name, "side": "CLOSE SHORT", "price": midprice, "pnl": pnl, "balance": balance})
+                        positions[fib_name] = {"type": "LONG", "entry": midprice}
+                        trade_log.append({"strategy": fib_name, "side": "OPEN LONG", "price": midprice, "balance": balance})
+
+            # NOTE: Because we run should_close at the top of each tick and also
+            # re-check before opening a new position, auto-close will be as instantaneous
+            # as the incoming websocket tick allows.
 
             # =========================
-            # AUTO-CLOSE POSITIONS
-            # =========================
-            for strat, pos in list(positions.items()):
-                unrealized = (midprice - pos["entry"]) if pos["type"] == "LONG" else (pos["entry"] - midprice)
-                if unrealized <= stop_loss_threshold or unrealized >= take_profit_threshold:
-                    pnl = unrealized
-                    balance += pnl
-                    side = "CLOSE LONG" if pos["type"] == "LONG" else "CLOSE SHORT"
-                    trade_log.append({"strategy": strat, "side": side, "price": midprice, "pnl": pnl, "balance": balance})
-                    positions.pop(strat)
-
-            # =========================
-            # PRINT OUTPUT
+            # PRINT OUTPUT (concise) — same style as before
             # =========================
             now = datetime.utcnow()
             print("\n⏱", now, "UTC")
-            print("⭐ Trend Models Signals:", trend_final)
+            print("⭐ Trend Models Signals (inverted):", trend_final)
             for k, v in signals_dict.items(): print(f"   {k:7}: {v}")
+            print("------------------------------------------------------------")
             print("⭐ HMA + T3 Crossing Signal:", cross_signal)
             print("⭐ Fibonacci Signal:", fib_signal)
+            print("--------------------------------")
             print(f"⭐ Balance: {balance:.2f}")
             print("⭐ Current Positions:")
             for strat, pos in positions.items():
-                unrealized = (midprice - pos["entry"]) if pos["type"] == "LONG" else (pos["entry"] - midprice)
-                print(f"   {strat:10}: {pos['type']} @ {pos['entry']:.2f} | Unrealized PnL: {unrealized:.2f}")
+                unrealized, pct = compute_unrealized(pos, midprice)
+                print(f"   {strat:10}: {pos['type']} @ {pos['entry']:.2f} | Unrealized PnL: {unrealized:.6f} | {pct*100:.3f}%")
             print("⭐ Last Trades:")
-            for t in trade_log[-5:]:
-                print(f"   {t['strategy']:10} {t['side']:15} @ {t['price']:.2f} | PnL: {t.get('pnl',0):.2f} | Balance: {t['balance']:.2f}")
+            for t in trade_log[-8:]:
+                print(f"   {t['strategy']:10} {t['side']:15} @ {t['price']:.2f} | PnL: {t.get('pnl',0):.6f} | Balance: {t['balance']:.2f}")
             print("------------------------------------------------------------")
-
 
 # =========================
 # RUN
