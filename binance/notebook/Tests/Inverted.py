@@ -7,6 +7,7 @@
 # =========================
 # IMPORTS
 # =========================
+import requests
 import asyncio
 import websockets
 import json
@@ -29,13 +30,100 @@ interval = 1  # seconds for price fetch
 window_size = 30  # trend model window
 cache_window = 300  # last 5 minutes for River ML
 price_history = []
-
+SYMBOL = "BTCUSDT"
+ROWS = 90  # top rows to sum
 # Binance client
 client = Client(tld="us", api_key="", api_secret="")
 
 # WebSocket
 ws_symbol = symbol.lower()
 WS_URL = f"wss://stream.binance.us:9443/ws/{ws_symbol}@depth"
+
+# Correct symbol mapping per exchange
+EXCHANGE_SYMBOL = {
+    "binance": lambda s: s,          # BTCUSDT
+    "kraken": lambda s: "XBTUSDT",   # Kraken uses XBT
+    "kucoin": lambda s: s.replace("USDT","-USDT"),
+    "huobi": lambda s: s.lower(),
+    "bybit": lambda s: s,            # BTCUSDT
+    "okx": lambda s: s.replace("USDT","-USDT")
+}
+
+def safe_json_get(url):
+    try:
+        r = requests.get(url, timeout=5)
+        r.raise_for_status()
+        return r.json()
+    except:
+        return None
+
+# ====== Exchange functions ======
+def get_binance(symbol):
+    r = safe_json_get(f"https://api.binance.com/api/v3/depth?symbol={symbol}&limit={ROWS}")
+    if r:
+        return r.get("bids", []), r.get("asks", [])
+    return [], []
+
+def get_kraken(symbol):
+    r = safe_json_get(f"https://api.kraken.com/0/public/Depth?pair={symbol}&count={ROWS}")
+    if r and "result" in r:
+        key = list(r["result"].keys())[0]
+        return r["result"][key]["bids"], r["result"][key]["asks"]
+    return [], []
+
+def get_kucoin(symbol):
+    r = safe_json_get(f"https://api.kucoin.com/api/v1/market/orderbook/level2_100?symbol={symbol}")
+    if r and "data" in r:
+        return r["data"]["bids"], r["data"]["asks"]
+    return [], []
+
+def get_huobi(symbol):
+    r = safe_json_get(f"https://api.huobi.pro/market/depth?symbol={symbol}&type=step0")
+    if r and "tick" in r:
+        return r["tick"]["bids"][:ROWS], r["tick"]["asks"][:ROWS]
+    return [], []
+
+def get_bybit(symbol):
+    r = safe_json_get(f"https://api.bybit.com/v5/market/books?instId={symbol}&sz={ROWS}")
+    if r and "data" in r and len(r["data"]) > 0:
+        data = r["data"][0]
+        return data["bids"], data["asks"]
+    return [], []
+
+def get_okx(symbol):
+    r = safe_json_get(f"https://www.okx.com/api/v5/market/books?instId={symbol}&sz={ROWS}")
+    if r and "data" in r and len(r["data"]) > 0:
+        data = r["data"][0]
+        return data["bids"], data["asks"]
+    return [], []
+
+EXCHANGES = {
+    "Binance": get_binance,
+    "Kraken": get_kraken,
+    "Kucoin": get_kucoin,
+    "Huobi": get_huobi,
+    "Bybit": get_bybit,
+    "OKX": get_okx
+}
+
+# ====== Aggregate bids and asks ======
+total_bid_amount = 0.0
+total_ask_amount = 0.0
+
+for name, func in EXCHANGES.items():
+    try:
+        mapped_symbol = EXCHANGE_SYMBOL[name.lower()](SYMBOL)
+        bids, asks = func(mapped_symbol)
+        if not bids:
+            print(f"{name} returned empty bids.")
+        if not asks:
+            print(f"{name} returned empty asks.")
+        total_bid_amount += sum(float(b[1]) for b in bids[:ROWS])
+        total_ask_amount += sum(float(a[1]) for a in asks[:ROWS])
+    except Exception as e:
+        print(f"{name} error: {e}")
+
+
 
 # Orderbook
 bids, asks = {}, {}
@@ -1007,6 +1095,9 @@ async def depth_stream():
             print("⭐ Fibonacci Signal:", fib_signal)
             print("--------------------------------")
             print(f"⭐ Balance: {balance:.2f}")
+            print(f"\nBTC (bids, top {ROWS} rows): {total_bid_amount:.6f} BTC")
+            print(f"BTC (asks, top {ROWS} rows): {total_ask_amount:.6f} BTC")
+            print("--------------------------------")
             print("⭐ Current Positions:")
             for strat, pos in positions.items():
                 unrealized, pct = compute_unrealized(pos, midprice)
