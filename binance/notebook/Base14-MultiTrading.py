@@ -59,6 +59,12 @@ trade_log = []
 # =========================
 # UTILITY FUNCTIONS
 # =========================
+def invert_signal(sig):
+    if isinstance(sig, str):
+        if "BUY" in sig: return "SELL 🔴"
+        if "SELL" in sig: return "BUY 🟢"
+    return sig
+
 def trend_signal(pred, last_price):
     if pred > last_price: return "BUY 🟢"
     elif pred < last_price: return "SELL 🔴"
@@ -192,6 +198,113 @@ def predict_ichimoku(prices, short=9, long=26):
     if prices[-1]>cloud_top: return prices[-1]*1.001
     elif prices[-1]<cloud_bot: return prices[-1]*0.999
     else: return prices[-1]
+
+# =========================
+# ADDITIONAL EXOTIC MODELS
+# =========================
+
+def predict_ar(prices, lags=8):
+    """Autoregressive-like predictor using ordinary least squares on lagged values."""
+    if len(prices) <= lags:
+        return prices[-1]
+    y = np.array(prices[lags:])
+    X = np.column_stack([np.array(prices[lags - i: -i]) for i in range(1, lags + 1)])
+    # add intercept
+    A = np.vstack([X.T, np.ones(X.shape[0])]).T
+    try:
+        coef = np.linalg.lstsq(A, y, rcond=None)[0]
+        last_row = np.array(prices[-lags:])[::-1]  # most recent lags (in same order used)
+        pred = last_row.dot(coef[:-1]) + coef[-1]
+        return float(pred)
+    except Exception:
+        return float(prices[-1])
+
+def predict_fft(prices, keep=6, horizon=1):
+    """FFT-based seasonal extrapolation: keep top `keep` spectral components and extrapolate."""
+    n = len(prices)
+    if n < 6:
+        return prices[-1]
+    x = np.array(prices) - np.mean(prices)
+    freqs = np.fft.rfft(x)
+    mags = np.abs(freqs)
+    # zero out small components
+    idx = np.argsort(mags)[-keep:]
+    mask = np.zeros_like(freqs, dtype=bool)
+    mask[idx] = True
+    filtered = freqs * mask
+    # reconstruct and linearly extrapolate the next step by assuming same phase progression
+    recon = np.fft.irfft(filtered, n=n)
+    # fall back to last reconstructed value + slope from last two reconstructed
+    if len(recon) >= 2:
+        slope = recon[-1] - recon[-2]
+        return float((recon[-1] + slope * horizon) + np.mean(prices))
+    else:
+        return float(prices[-1])
+
+def predict_macd_midprice(prices, fast=12, slow=26, signal=9):
+    """Return a projection based on MACD momentum added to last price (small-step projection)."""
+    if len(prices) < slow:
+        return prices[-1]
+    def ema(arr, n):
+        weights = np.exp(np.linspace(-1., 0., n))
+        weights /= weights.sum()
+        return np.convolve(arr, weights, mode='valid')
+    fast_series = ema(prices, fast)
+    slow_series = ema(prices, slow)
+    if len(fast_series) < 1 or len(slow_series) < 1:
+        return prices[-1]
+    # align ends
+    macd = fast_series[-len(slow_series):] - slow_series
+    if len(macd) < signal:
+        macd_signal = np.mean(macd)
+    else:
+        macd_signal = ema(macd, signal)[-1]
+    macd_hist = macd[-1] - macd_signal
+    # project a small step proportional to macd_hist
+    return float(prices[-1] + 0.5 * macd_hist)
+
+def predict_median_filter(prices, period=7):
+    """Robust median-filter prediction (resistant to spikes)."""
+    if len(prices) < period:
+        return prices[-1]
+    return float(np.median(prices[-period:]))
+
+def predict_entropy_weighted(prices, period=20):
+    """Weights recent prices by inverse normalised return entropy (lower entropy -> higher weight)."""
+    if len(prices) < 6:
+        return prices[-1]
+    window = np.array(prices[-period:])
+    ret = np.diff(window)
+    # small probabilistic entropy proxy: use normalized absolute returns distribution
+    if len(ret) < 2:
+        return prices[-1]
+    probs, _ = np.histogram(np.abs(ret), bins=6, density=True)
+    probs = probs + 1e-9
+    probs /= probs.sum()
+    entropy = -np.sum(probs * np.log(probs))
+    # produce a weight inversely proportional to entropy; apply to recent values
+    win_len = min(period, len(window))
+    weights = 1.0 / (1.0 + np.linspace(entropy, entropy * 0.5, win_len))
+    weights /= weights.sum()
+    return float(np.dot(window[-win_len:], weights))
+
+def predict_rls_trend(prices):
+    """Simple batch Recursive Least Squares-like trend projection (forgetting via exponential window)."""
+    n = len(prices)
+    if n < 3:
+        return prices[-1]
+    lam = 0.97  # forgetting factor
+    # fit line with exponential weights
+    x = np.arange(n)
+    w = lam ** (n - 1 - x)  # recent points higher weight
+    W = np.diag(w)
+    A = np.vstack([x, np.ones_like(x)]).T
+    try:
+        beta = np.linalg.lstsq(A.T @ W @ A, A.T @ W @ np.array(prices), rcond=None)[0]
+        next_x = n
+        return float(beta[0] * next_x + beta[1])
+    except Exception:
+        return float(prices[-1])
 
 # =========================
 # HFT INDICATORS
@@ -340,13 +453,9 @@ stop_loss_threshold = -0.1    # PnL threshold for stop-loss
 take_profit_threshold = 0.2   # PnL threshold for take-profit
 
 # =========================
-# =========================
 # FIBONACCI TREND MODULE
 # =========================
 def fibonacci_levels(prices, lookback=30):
-    """
-    Calculate Fibonacci retracement levels from recent high/low.
-    """
     if len(prices) < lookback:
         return None
     recent_prices = prices[-lookback:]
@@ -365,30 +474,19 @@ def fibonacci_levels(prices, lookback=30):
     return levels
 
 def fibonacci_signal(midprice, levels):
-    """
-    Generate BUY/SELL signal based on Fibonacci levels.
-    - BUY near support levels (0.618, 0.786)
-    - SELL near resistance levels (0.236, 0.382)
-    """
     if levels is None: return "NEUTRAL ➖"
     support_levels = [levels["0.618"], levels["0.786"]]
     resistance_levels = [levels["0.236"], levels["0.382"]]
-
-    # Close to support -> buy
     if any(abs(midprice - s)/s < 0.002 for s in support_levels):
         return "BUY 🟢"
-    # Close to resistance -> sell
     elif any(abs(midprice - r)/r < 0.002 for r in resistance_levels):
         return "SELL 🔴"
-    # Above 0.236 -> bullish
     elif midprice > levels["0.236"]:
         return "BULLISH 📈"
-    # Below 0.786 -> bearish
     elif midprice < levels["0.786"]:
         return "BEARISH 📉"
     else:
         return "NEUTRAL ➖"
-
 
 # =========================
 # LIVE STREAM LOOP WITH SIGNAL INVERSION
@@ -420,7 +518,7 @@ async def depth_stream():
             if len(price_history) > window_size:
                 price_history[:] = price_history[-window_size:]
 
-            # --- trend model predictions
+            # --- trend model predictions (two groups)
             preds = [
                 predict_lr(price_history),
                 predict_hma(price_history),
@@ -439,8 +537,30 @@ async def depth_stream():
                 predict_t3(price_history),
                 predict_ichimoku(price_history)
             ]
+
+            preds2 = [
+                 predict_ar(price_history, lags=8),
+                 predict_fft(price_history, keep=6, horizon=1),
+                 predict_macd_midprice(price_history),
+                 predict_median_filter(price_history, period=7),
+                 predict_entropy_weighted(price_history, period=20),
+                 predict_rls_trend(price_history)              
+            ]
+
+            # trend summary uses first group (preds)
             trend_final = merge_signals(preds, midprice)
-            signals_dict = {f"M{i}": invert_signal(trend_signal(p, midprice)) for i, p in enumerate(preds, 1)}
+
+            # FIRST SET → INVERTED SIGNALS (M1..)
+            signals_dict = {
+                f"M{i}": invert_signal(trend_signal(p, midprice))
+                for i, p in enumerate(preds, 1)
+            }
+
+            # SECOND SET → NATURAL SIGNALS (N1..)
+            signals_dict_normal = {
+                f"N{i}": trend_signal(p, midprice)
+                for i, p in enumerate(preds2, 1)
+            }
 
             # --- HFT & FPGA features
             ofi = order_flow_imbalance()
@@ -496,7 +616,7 @@ async def depth_stream():
             # =========================
             # MULTI-STRATEGY TRADING LOGIC
             # =========================
-            # Trend Models M1-M16
+            # A) Trend Models M1.. (INVERTED signals_dict) — existing behaviour
             for name, signal in signals_dict.items():
                 if signal == "SELL 🔴":
                     # open LONG becomes SHORT
@@ -517,7 +637,26 @@ async def depth_stream():
                         positions[name] = {"type": "LONG", "entry": midprice}
                         trade_log.append({"strategy": name, "side": "OPEN LONG", "price": midprice, "balance": balance})
 
-            # HMA+T3 crossing
+            # B) Trend Models N1.. (NON-INVERTED signals_dict_normal) — NEW behaviour
+            for name, signal in signals_dict_normal.items():
+                if signal == "BUY 🟢":
+                    if positions.get(name, {}).get("type") != "LONG":
+                        if positions.get(name, {}).get("type") == "SHORT":
+                            pnl = positions[name]["entry"] - midprice
+                            balance += pnl
+                            trade_log.append({"strategy": name, "side": "CLOSE SHORT", "price": midprice, "pnl": pnl, "balance": balance})
+                        positions[name] = {"type": "LONG", "entry": midprice}
+                        trade_log.append({"strategy": name, "side": "OPEN LONG", "price": midprice, "balance": balance})
+                elif signal == "SELL 🔴":
+                    if positions.get(name, {}).get("type") != "SHORT":
+                        if positions.get(name, {}).get("type") == "LONG":
+                            pnl = midprice - positions[name]["entry"]
+                            balance += pnl
+                            trade_log.append({"strategy": name, "side": "CLOSE LONG", "price": midprice, "pnl": pnl, "balance": balance})
+                        positions[name] = {"type": "SHORT", "entry": midprice}
+                        trade_log.append({"strategy": name, "side": "OPEN SHORT", "price": midprice, "balance": balance})
+
+            # HMA+T3 crossing (keeps inverted behaviour)
             hma_name = "HMA+T3"
             if cross_signal == "BUY 🟢":
                 if positions.get(hma_name, {}).get("type") != "SHORT":
@@ -536,7 +675,7 @@ async def depth_stream():
                     positions[hma_name] = {"type": "LONG", "entry": midprice}
                     trade_log.append({"strategy": hma_name, "side": "OPEN LONG", "price": midprice, "balance": balance})
 
-            # Fibonacci strategy
+            # Fibonacci strategy (keeps inverted behaviour)
             fib_name = "FIB"
             if fib_signal in ["BUY 🟢", "BULLISH 📈"]:
                 if positions.get(fib_name, {}).get("type") != "SHORT":
@@ -568,12 +707,14 @@ async def depth_stream():
                     positions.pop(strat)
 
             # =========================
-            # PRINT OUTPUT
+            # PRINT OUTPUT (concise)
             # =========================
             now = datetime.utcnow()
             print("\n⏱", now, "UTC")
-            print("⭐ Trend Models Signals:", trend_final)
+            print("⭐ Trend Models Signals (inverted):", trend_final)
             for k, v in signals_dict.items(): print(f"   {k:7}: {v}")
+            print("⭐ Trend Models Signals (Normal):", trend_final)
+            for k, v in signals_dict_normal.items(): print(f"   {k:7}: {v}")
             print("⭐ HMA + T3 Crossing Signal:", cross_signal)
             print("⭐ Fibonacci Signal:", fib_signal)
             print(f"⭐ Balance: {balance:.2f}")
@@ -591,5 +732,3 @@ async def depth_stream():
 # RUN
 # =========================
 await depth_stream()
-
-add option of spread and fee to every trade
