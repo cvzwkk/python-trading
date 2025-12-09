@@ -706,17 +706,20 @@ async def depth_stream():
                     trade_log.append({"strategy": strat, "side": side, "price": midprice, "pnl": pnl, "balance": balance})
                     positions.pop(strat)
 
-            # =========================
+           # =========================
             # PRINT OUTPUT (concise)
             # =========================
             now = datetime.utcnow()
             print("\n⏱", now, "UTC")
             print("⭐ Trend Models Signals (inverted):", trend_final)
             for k, v in signals_dict.items(): print(f"   {k:7}: {v}")
+            print("------------------------------------------------------------")          
             print("⭐ Trend Models Signals (Normal):", trend_final)
             for k, v in signals_dict_normal.items(): print(f"   {k:7}: {v}")
+            print("------------------------------------------------------------")     
             print("⭐ HMA + T3 Crossing Signal:", cross_signal)
             print("⭐ Fibonacci Signal:", fib_signal)
+            print("--------------------------------")    
             print(f"⭐ Balance: {balance:.2f}")
             print("⭐ Current Positions:")
             for strat, pos in positions.items():
@@ -726,7 +729,6 @@ async def depth_stream():
             for t in trade_log[-5:]:
                 print(f"   {t['strategy']:10} {t['side']:15} @ {t['price']:.2f} | PnL: {t.get('pnl',0):.2f} | Balance: {t['balance']:.2f}")
             print("------------------------------------------------------------")
-
 
 # =========================
 # RUN
