@@ -42,11 +42,8 @@ def predict_kalman(prices):
     kf = KalmanFilter(initial_state_mean=prices[0], n_dim_obs=1)
     return float(kf.smooth(np.array(prices))[0][-1])
 
-def predict_cwma(prices):
-    return float(np.mean(prices))
-
-def predict_dma(prices, d=3):
-    return float(np.mean(prices[-d:]))
+def predict_cwma(prices): return float(np.mean(prices))
+def predict_dma(prices, d=3): return float(np.mean(prices[-d:]))
 
 def predict_ema(prices, p=10):
     if len(prices) < p: return prices[-1]
@@ -96,35 +93,76 @@ MODELS = {
 class PaperTrader:
     def __init__(self, balance=1000):
         self.balance = balance
-        self.positions = {
-            ex: {m: None for m in MODELS} for ex in APIS
-        }
-        self.pnl = {
-            ex: {m: 0.0 for m in MODELS} for ex in APIS
+
+        self.positions = {ex: {m: None for m in MODELS} for ex in APIS}
+        self.pnl = {ex: {m: 0.0 for m in MODELS} for ex in APIS}
+
+        self.stats = {
+            ex: {m: {"wins": 0, "losses": 0, "win_pnl": 0.0, "loss_pnl": 0.0}
+                 for m in MODELS}
+            for ex in APIS
         }
 
-    def open_trade(self, ex, model, side, price):
+    def kelly_fraction(self, ex, model, cap=0.25):
+        s = self.stats[ex][model]
+        total = s["wins"] + s["losses"]
+        if total < 10:
+            return 0.05
+
+        win_rate = s["wins"] / total
+        avg_win = s["win_pnl"] / s["wins"] if s["wins"] else 0
+        avg_loss = s["loss_pnl"] / s["losses"] if s["losses"] else 0
+
+        if avg_loss == 0:
+            return 0.05
+
+        k = win_rate - (1 - win_rate) / (avg_win / avg_loss)
+        return max(0.0, min(k * cap, cap))
+
+    def calculate_position_size(self, ex, model, price, prices):
+        if len(prices) < 2:
+            return 0.001
+
+        volatility = np.mean(np.abs(np.diff(prices[-10:])))
+        if volatility <= 0:
+            return 0.001
+
+        risk_size = (self.balance * 0.002) / volatility
+        kelly_size = (self.balance * self.kelly_fraction(ex, model)) / price
+
+        size = min(risk_size, kelly_size)
+        return float(np.clip(size, 0.001, 1.0))
+
+    def open_trade(self, ex, model, side, price, size):
         if self.positions[ex][model] is None:
             self.positions[ex][model] = {
                 "side": side,
-                "entry": price
+                "entry": price,
+                "size": size
             }
 
     def close_trade(self, ex, model, price):
         pos = self.positions[ex][model]
-        if pos:
-            pnl = (price - pos["entry"]) if pos["side"] == "buy" else (pos["entry"] - price)
-            self.pnl[ex][model] += pnl
-            self.balance += pnl
-            self.positions[ex][model] = None
+        if not pos:
+            return
+
+        pnl = ((price - pos["entry"]) if pos["side"] == "buy"
+               else (pos["entry"] - price)) * pos["size"]
+
+        self.balance += pnl
+        self.pnl[ex][model] += pnl
+
+        if pnl > 0:
+            self.stats[ex][model]["wins"] += 1
+            self.stats[ex][model]["win_pnl"] += pnl
+        else:
+            self.stats[ex][model]["losses"] += 1
+            self.stats[ex][model]["loss_pnl"] += abs(pnl)
+
+        self.positions[ex][model] = None
 
     def open_trades(self):
-        trades = []
-        for ex in APIS:
-            for m, pos in self.positions[ex].items():
-                if pos:
-                    trades.append((ex, m, pos))
-        return trades
+        return [(ex, m, p) for ex in APIS for m, p in self.positions[ex].items() if p]
 
     def total_pnl(self):
         return sum(self.pnl[ex][m] for ex in APIS for m in MODELS)
@@ -182,19 +220,18 @@ async def main():
                     pos = trader.positions[ex][model]
 
                     if pos is None:
-                        if pred > price:
-                            trader.open_trade(ex, model, "buy", price)
-                        elif pred < price:
-                            trader.open_trade(ex, model, "sell", price)
+                        if pred != price:
+                            side = "buy" if pred > price else "sell"
+                            size = trader.calculate_position_size(ex, model, price, history[ex])
+                            trader.open_trade(ex, model, side, price, size)
                     else:
-                        if pos["side"] == "buy" and pred < price:
-                            trader.close_trade(ex, model, price)
-                        elif pos["side"] == "sell" and pred > price:
+                        if (pos["side"] == "buy" and pred < price) or \
+                           (pos["side"] == "sell" and pred > price):
                             trader.close_trade(ex, model, price)
 
             print("\n📊 OPEN TRADES")
             for ex, m, pos in trader.open_trades():
-                print(f"{ex:10} | {m:9} | {pos['side'].upper():4} | {pos['entry']:.2f}")
+                print(f"{ex:10} | {m:9} | {pos['side'].upper():4} | {pos['entry']:.2f} | {pos['size']:.4f}")
 
             print(f"\n💰 Balance: ${trader.balance:,.2f} | PnL: ${trader.total_pnl():,.2f}")
 
