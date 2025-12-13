@@ -1,4 +1,3 @@
-
 import os
 import asyncio
 import aiohttp
@@ -6,23 +5,16 @@ import numpy as np
 import time
 from collections import deque
 from pykalman import KalmanFilter
-from binance.client import Client
 
 # =========================
-# BINANCE.US CLIENT
-# =========================
-client = Client(tld="us")
-
-# =========================
-# EXCHANGES
+# EXCHANGES (NO BINANCE)
 # =========================
 APIS = {
     "CoinGecko": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
     "Coinbase": "https://api.coinbase.com/v2/prices/spot?currency=USD",
     "Kraken": "https://api.kraken.com/0/public/Ticker?pair=XBTUSD",
     "Bitfinex": "https://api.bitfinex.com/v1/pubticker/btcusd",
-    "Bitstamp": "https://www.bitstamp.net/api/v2/ticker/btcusd/",
-    "Binance.US": "BINANCE"
+    "Bitstamp": "https://www.bitstamp.net/api/v2/ticker/btcusd/"
 }
 
 # =========================
@@ -45,11 +37,8 @@ def predict_kalman(prices):
     kf = KalmanFilter(initial_state_mean=prices[0], n_dim_obs=1)
     return float(kf.smooth(np.array(prices))[0][-1])
 
-def predict_cwma(prices):
-    return float(np.mean(prices))
-
-def predict_dma(prices, d=3):
-    return float(np.mean(prices[-d:]))
+def predict_cwma(prices): return float(np.mean(prices))
+def predict_dma(prices, d=3): return float(np.mean(prices[-d:]))
 
 def predict_ema(prices, p=10):
     if len(prices) < p: return prices[-1]
@@ -125,8 +114,6 @@ class PaperTrader:
 # =========================
 async def fetch_price(ex, url, session):
     try:
-        if ex == "Binance.US":
-            return ex, float(client.get_symbol_ticker(symbol="BTCUSDT")["price"])
         async with session.get(url, timeout=5) as r:
             d = await r.json()
             return ex, float(
@@ -176,14 +163,10 @@ async def main():
                     pos = trader.positions[ex][model]
 
                     if pos is None:
-                        if pred > price:
-                            trader.open_trade(ex, model, "buy", price)
-                        elif pred < price:
-                            trader.open_trade(ex, model, "sell", price)
+                        trader.open_trade(ex, model, "buy" if pred > price else "sell", price)
                     else:
-                        if pos["side"] == "buy" and pred < price:
-                            trader.close_trade(ex, model, price)
-                        elif pos["side"] == "sell" and pred > price:
+                        if (pos["side"] == "buy" and pred < price) or \
+                           (pos["side"] == "sell" and pred > price):
                             trader.close_trade(ex, model, price)
 
             total_pnl = trader.total_pnl()
@@ -192,7 +175,6 @@ async def main():
 
             pnl_min = sum(pnl_per_second)
             avg_pnl_sec = pnl_min / len(pnl_per_second) if pnl_per_second else 0.0
-
             last_total_pnl = total_pnl
 
             print("\n📊 OPEN TRADES")
