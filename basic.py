@@ -1,4 +1,3 @@
-#!pip install pykalman python-binance numpy
 import os
 import asyncio
 import aiohttp
@@ -9,10 +8,10 @@ from binance.client import Client
 # =========================
 # BINANCE.US CLIENT
 # =========================
-client = Client(tld='us')  # no API key required
+client = Client(tld="us")
 
 # =========================
-# EXCHANGE PRICE URLS
+# EXCHANGES
 # =========================
 APIS = {
     "CoinGecko": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
@@ -20,146 +19,184 @@ APIS = {
     "Kraken": "https://api.kraken.com/0/public/Ticker?pair=XBTUSD",
     "Bitfinex": "https://api.bitfinex.com/v1/pubticker/btcusd",
     "Bitstamp": "https://www.bitstamp.net/api/v2/ticker/btcusd/",
-    "Binance.US": "Binance.US Client"
+    "Binance.US": "BINANCE"
 }
 
 # =========================
-# PAPER TRADING STATE
-# =========================
-class PaperTrader:
-    def __init__(self, initial_balance=1000):
-        self.balance = initial_balance
-        self.positions = {ex: None for ex in APIS.keys()}
-        self.pnl = {ex: 0.0 for ex in APIS.keys()}
-
-    def open_trade(self, exchange, trade_type, price, size=1):
-        if self.positions[exchange] is None:
-            self.positions[exchange] = {"type": trade_type, "price": price, "size": size}
-
-    def close_trade(self, exchange, price):
-        pos = self.positions[exchange]
-        if pos:
-            if pos["type"] == "buy":
-                profit = (price - pos["price"]) * pos["size"]
-            else:
-                profit = (pos["price"] - price) * pos["size"]
-            self.pnl[exchange] += profit
-            self.balance += profit
-            self.positions[exchange] = None
-
-    def get_summary(self):
-        summary = f"Balance: ${self.balance:,.2f} | Total PnL: ${sum(self.pnl.values()):,.2f}\n"
-        for ex, pos in self.positions.items():
-            if pos:
-                summary += f"{ex:12}: OPEN {pos['type'].upper()} at ${pos['price']:.2f}\n"
-            else:
-                summary += f"{ex:12}: NO POSITION\n"
-        return summary
-
-    def get_open_trades(self):
-        """Return only currently open trades"""
-        return {ex: pos for ex, pos in self.positions.items() if pos is not None}
-
-# =========================
-# TREND PREDICTION MODELS
+# TREND MODELS
 # =========================
 def predict_lr(prices):
-    if len(prices) < 2:
-        return prices[-1]
+    if len(prices) < 2: return prices[-1]
     x = np.arange(len(prices))
     y = np.array(prices)
-    A = np.vstack([x, np.ones(len(x))]).T
-    m, c = np.linalg.lstsq(A, y, rcond=None)[0]
+    m, c = np.linalg.lstsq(np.vstack([x, np.ones(len(x))]).T, y, rcond=None)[0]
     return float(m * len(prices) + c)
 
+def predict_hma(prices, period=16):
+    if len(prices) < period: return prices[-1]
+    w = np.arange(1, period + 1)
+    return float(np.dot(prices[-period:], w) / w.sum())
+
+def predict_kalman(prices):
+    if len(prices) < 2: return prices[-1]
+    kf = KalmanFilter(initial_state_mean=prices[0], n_dim_obs=1)
+    return float(kf.smooth(np.array(prices))[0][-1])
+
+def predict_cwma(prices):
+    return float(np.mean(prices))
+
+def predict_dma(prices, d=3):
+    return float(np.mean(prices[-d:]))
+
+def predict_ema(prices, p=10):
+    if len(prices) < p: return prices[-1]
+    w = np.exp(np.linspace(-1, 0, p))
+    w /= w.sum()
+    return float(np.convolve(prices[-p:], w, mode="valid")[0])
+
+def predict_tema(prices, p=10):
+    if len(prices) < p * 3: return prices[-1]
+    ema1 = predict_ema(prices, p)
+    ema2 = predict_ema([ema1], p)
+    ema3 = predict_ema([ema2], p)
+    return float(3 * ema1 - 3 * ema2 + ema3)
+
+def predict_wma(prices, p=10):
+    if len(prices) < p: return prices[-1]
+    w = np.arange(1, p + 1)
+    return float(np.dot(prices[-p:], w) / w.sum())
+
+def predict_smma(prices, p=10):
+    if len(prices) < p: return prices[-1]
+    smma = np.mean(prices[:p])
+    for x in prices[p:]:
+        smma = (smma * (p - 1) + x) / p
+    return float(smma)
+
+def predict_momentum(prices, p=5):
+    if len(prices) < p + 1: return 0.0
+    return float(prices[-1] - prices[-p - 1])
+
+MODELS = {
+    "LR": predict_lr,
+    "HMA": predict_hma,
+    "Kalman": predict_kalman,
+    "CWMA": predict_cwma,
+    "DMA": predict_dma,
+    "EMA": predict_ema,
+    "TEMA": predict_tema,
+    "WMA": predict_wma,
+    "SMMA": predict_smma,
+    "Momentum": predict_momentum
+}
+
 # =========================
-# FETCH PRICES
+# PAPER TRADER
 # =========================
-async def fetch_price(name, url=None, session=None):
+class PaperTrader:
+    def __init__(self, balance=1000):
+        self.balance = balance
+        self.positions = {
+            ex: {m: None for m in MODELS} for ex in APIS
+        }
+        self.pnl = {
+            ex: {m: 0.0 for m in MODELS} for ex in APIS
+        }
+
+    def open_trade(self, ex, model, side, price):
+        if self.positions[ex][model] is None:
+            self.positions[ex][model] = {
+                "side": side,
+                "entry": price
+            }
+
+    def close_trade(self, ex, model, price):
+        pos = self.positions[ex][model]
+        if pos:
+            pnl = (price - pos["entry"]) if pos["side"] == "buy" else (pos["entry"] - price)
+            self.pnl[ex][model] += pnl
+            self.balance += pnl
+            self.positions[ex][model] = None
+
+    def open_trades(self):
+        trades = []
+        for ex in APIS:
+            for m, pos in self.positions[ex].items():
+                if pos:
+                    trades.append((ex, m, pos))
+        return trades
+
+    def total_pnl(self):
+        return sum(self.pnl[ex][m] for ex in APIS for m in MODELS)
+
+# =========================
+# FETCH PRICE
+# =========================
+async def fetch_price(ex, url, session):
     try:
-        if name == "Binance.US":
-            price = client.get_symbol_ticker(symbol="BTCUSDT")
-            return name, float(price['price'])
-        else:
-            async with session.get(url, timeout=5) as resp:
-                data = await resp.json()
-                if name == "CoinGecko":
-                    return name, float(data["bitcoin"]["usd"])
-                elif name == "Coinbase":
-                    return name, float(data["data"]["amount"])
-                elif name == "Kraken":
-                    pair = list(data["result"].keys())[0]
-                    return name, float(data["result"][pair]["c"][0])
-                elif name == "Bitfinex":
-                    return name, float(data["last_price"])
-                elif name == "Bitstamp":
-                    return name, float(data["last"])
-        return name, None
-    except Exception:
-        return name, None
+        if ex == "Binance.US":
+            return ex, float(client.get_symbol_ticker(symbol="BTCUSDT")["price"])
+        async with session.get(url, timeout=5) as r:
+            d = await r.json()
+            return ex, float(
+                d["bitcoin"]["usd"] if ex == "CoinGecko" else
+                d["data"]["amount"] if ex == "Coinbase" else
+                d["last"] if ex == "Bitstamp" else
+                d["last_price"] if ex == "Bitfinex" else
+                list(d["result"].values())[0]["c"][0]
+            )
+    except:
+        return ex, None
 
-def clear_console():
-    os.system('cls' if os.name == 'nt' else 'clear')
+def clear():
+    os.system("cls" if os.name == "nt" else "clear")
 
 # =========================
-# PAPER TRADING LOOP
+# MAIN LOOP
 # =========================
-async def paper_trading_loop():
+async def main():
     trader = PaperTrader()
-    prices_history = {ex: [] for ex in APIS.keys()}
+    history = {ex: [] for ex in APIS}
 
     async with aiohttp.ClientSession() as session:
         while True:
-            tasks = [fetch_price(name, url, session) for name, url in APIS.items()]
-            results = await asyncio.gather(*tasks)
+            results = await asyncio.gather(*[
+                fetch_price(ex, url, session) for ex, url in APIS.items()
+            ])
 
-            clear_console()
-            print("🔵 LIVE BTC PRICE (USD) 🔵\n")
+            clear()
+            print("🔵 BTC LIVE PRICE\n")
 
-            for name, price in results:
-                if price is not None:
-                    print(f"{name:12}: ${price:,.2f}")
-                    prices_history[name].append(price)
-                    if len(prices_history[name]) > 50:
-                        prices_history[name].pop(0)
-                else:
-                    print(f"{name:12}: Error fetching price")
+            for ex, price in results:
+                if price:
+                    history[ex].append(price)
+                    history[ex] = history[ex][-50:]
+                    print(f"{ex:10}: ${price:,.2f}")
 
-            # Apply trend model and manage trades
-            for name, price in results:
-                if price is None or len(prices_history[name]) < 5:
+            for ex, price in results:
+                if not price or len(history[ex]) < 10:
                     continue
-                pos = trader.positions[name]
-                pred = predict_lr(prices_history[name])
 
-                if pos is None:
-                    # No position, open new trade
-                    if pred > price:
-                        trader.open_trade(name, "buy", price)
-                    elif pred < price:
-                        trader.open_trade(name, "sell", price)
-                else:
-                    # Position exists, check if opposite signal to close
-                    if pos["type"] == "buy" and pred < price:
-                        trader.close_trade(name, price)
-                        trader.open_trade(name, "sell", price)
-                    elif pos["type"] == "sell" and pred > price:
-                        trader.close_trade(name, price)
-                        trader.open_trade(name, "buy", price)
+                for model, fn in MODELS.items():
+                    pred = fn(history[ex])
+                    pos = trader.positions[ex][model]
 
-            # =========================
-            # PRINT OPEN TRADES
-            # =========================
-            print("\n📊 OPENED TRADES 📊")
-            open_trades = trader.get_open_trades()
-            if open_trades:
-                for ex, pos in open_trades.items():
-                    print(f"{ex:12}: {pos['type'].upper()} at ${pos['price']:.2f}")
-            else:
-                print("No open trades currently.")
+                    if pos is None:
+                        if pred > price:
+                            trader.open_trade(ex, model, "buy", price)
+                        elif pred < price:
+                            trader.open_trade(ex, model, "sell", price)
+                    else:
+                        if pos["side"] == "buy" and pred < price:
+                            trader.close_trade(ex, model, price)
+                        elif pos["side"] == "sell" and pred > price:
+                            trader.close_trade(ex, model, price)
 
-            # Print balance & total PnL
-            print(f"\nBalance: ${trader.balance:,.2f} | Total PnL: ${sum(trader.pnl.values()):,.2f}")
+            print("\n📊 OPEN TRADES")
+            for ex, m, pos in trader.open_trades():
+                print(f"{ex:10} | {m:9} | {pos['side'].upper():4} | {pos['entry']:.2f}")
+
+            print(f"\n💰 Balance: ${trader.balance:,.2f} | PnL: ${trader.total_pnl():,.2f}")
 
             await asyncio.sleep(1)
 
@@ -167,4 +204,4 @@ async def paper_trading_loop():
 # RUN
 # =========================
 if __name__ == "__main__":
-    asyncio.run(paper_trading_loop())
+    asyncio.run(main())
