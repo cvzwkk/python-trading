@@ -1,7 +1,10 @@
+
 import os
 import asyncio
 import aiohttp
 import numpy as np
+import time
+from collections import deque
 from pykalman import KalmanFilter
 from binance.client import Client
 
@@ -42,8 +45,11 @@ def predict_kalman(prices):
     kf = KalmanFilter(initial_state_mean=prices[0], n_dim_obs=1)
     return float(kf.smooth(np.array(prices))[0][-1])
 
-def predict_cwma(prices): return float(np.mean(prices))
-def predict_dma(prices, d=3): return float(np.mean(prices[-d:]))
+def predict_cwma(prices):
+    return float(np.mean(prices))
+
+def predict_dma(prices, d=3):
+    return float(np.mean(prices[-d:]))
 
 def predict_ema(prices, p=10):
     if len(prices) < p: return prices[-1]
@@ -93,76 +99,23 @@ MODELS = {
 class PaperTrader:
     def __init__(self, balance=1000):
         self.balance = balance
-
         self.positions = {ex: {m: None for m in MODELS} for ex in APIS}
         self.pnl = {ex: {m: 0.0 for m in MODELS} for ex in APIS}
 
-        self.stats = {
-            ex: {m: {"wins": 0, "losses": 0, "win_pnl": 0.0, "loss_pnl": 0.0}
-                 for m in MODELS}
-            for ex in APIS
-        }
-
-    def kelly_fraction(self, ex, model, cap=0.25):
-        s = self.stats[ex][model]
-        total = s["wins"] + s["losses"]
-        if total < 10:
-            return 0.05
-
-        win_rate = s["wins"] / total
-        avg_win = s["win_pnl"] / s["wins"] if s["wins"] else 0
-        avg_loss = s["loss_pnl"] / s["losses"] if s["losses"] else 0
-
-        if avg_loss == 0:
-            return 0.05
-
-        k = win_rate - (1 - win_rate) / (avg_win / avg_loss)
-        return max(0.0, min(k * cap, cap))
-
-    def calculate_position_size(self, ex, model, price, prices):
-        if len(prices) < 2:
-            return 0.001
-
-        volatility = np.mean(np.abs(np.diff(prices[-10:])))
-        if volatility <= 0:
-            return 0.001
-
-        risk_size = (self.balance * 0.002) / volatility
-        kelly_size = (self.balance * self.kelly_fraction(ex, model)) / price
-
-        size = min(risk_size, kelly_size)
-        return float(np.clip(size, 0.001, 1.0))
-
-    def open_trade(self, ex, model, side, price, size):
+    def open_trade(self, ex, model, side, price):
         if self.positions[ex][model] is None:
-            self.positions[ex][model] = {
-                "side": side,
-                "entry": price,
-                "size": size
-            }
+            self.positions[ex][model] = {"side": side, "entry": price}
 
     def close_trade(self, ex, model, price):
         pos = self.positions[ex][model]
-        if not pos:
-            return
-
-        pnl = ((price - pos["entry"]) if pos["side"] == "buy"
-               else (pos["entry"] - price)) * pos["size"]
-
-        self.balance += pnl
-        self.pnl[ex][model] += pnl
-
-        if pnl > 0:
-            self.stats[ex][model]["wins"] += 1
-            self.stats[ex][model]["win_pnl"] += pnl
-        else:
-            self.stats[ex][model]["losses"] += 1
-            self.stats[ex][model]["loss_pnl"] += abs(pnl)
-
-        self.positions[ex][model] = None
+        if pos:
+            pnl = (price - pos["entry"]) if pos["side"] == "buy" else (pos["entry"] - price)
+            self.pnl[ex][model] += pnl
+            self.balance += pnl
+            self.positions[ex][model] = None
 
     def open_trades(self):
-        return [(ex, m, p) for ex in APIS for m, p in self.positions[ex].items() if p]
+        return [(ex, m, pos) for ex in APIS for m, pos in self.positions[ex].items() if pos]
 
     def total_pnl(self):
         return sum(self.pnl[ex][m] for ex in APIS for m in MODELS)
@@ -196,6 +149,9 @@ async def main():
     trader = PaperTrader()
     history = {ex: [] for ex in APIS}
 
+    last_total_pnl = 0.0
+    pnl_per_second = deque(maxlen=60)
+
     async with aiohttp.ClientSession() as session:
         while True:
             results = await asyncio.gather(*[
@@ -220,20 +176,35 @@ async def main():
                     pos = trader.positions[ex][model]
 
                     if pos is None:
-                        if pred != price:
-                            side = "buy" if pred > price else "sell"
-                            size = trader.calculate_position_size(ex, model, price, history[ex])
-                            trader.open_trade(ex, model, side, price, size)
+                        if pred > price:
+                            trader.open_trade(ex, model, "buy", price)
+                        elif pred < price:
+                            trader.open_trade(ex, model, "sell", price)
                     else:
-                        if (pos["side"] == "buy" and pred < price) or \
-                           (pos["side"] == "sell" and pred > price):
+                        if pos["side"] == "buy" and pred < price:
                             trader.close_trade(ex, model, price)
+                        elif pos["side"] == "sell" and pred > price:
+                            trader.close_trade(ex, model, price)
+
+            total_pnl = trader.total_pnl()
+            pnl_sec = total_pnl - last_total_pnl
+            pnl_per_second.append(pnl_sec)
+
+            pnl_min = sum(pnl_per_second)
+            avg_pnl_sec = pnl_min / len(pnl_per_second) if pnl_per_second else 0.0
+
+            last_total_pnl = total_pnl
 
             print("\n📊 OPEN TRADES")
             for ex, m, pos in trader.open_trades():
-                print(f"{ex:10} | {m:9} | {pos['side'].upper():4} | {pos['entry']:.2f} | {pos['size']:.4f}")
+                print(f"{ex:10} | {m:9} | {pos['side'].upper():4} | {pos['entry']:.2f}")
 
-            print(f"\n💰 Balance: ${trader.balance:,.2f} | PnL: ${trader.total_pnl():,.2f}")
+            print("\n💰 ACCOUNT")
+            print(f"Balance        : ${trader.balance:,.2f}")
+            print(f"Total PnL      : ${total_pnl:,.2f}")
+            print(f"PnL / Second   : ${pnl_sec:,.4f}")
+            print(f"PnL / Minute   : ${pnl_min:,.4f}")
+            print(f"Avg PnL / Sec  : ${avg_pnl_sec:,.4f}")
 
             await asyncio.sleep(1)
 
