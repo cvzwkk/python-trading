@@ -18,7 +18,7 @@ import uvicorn
 # =========================
 # NGROK AUTH (OPTIONAL)
 # =========================
-NGROK_AUTHTOKEN = "ngrok authkey"
+NGROK_AUTHTOKEN = "36xhpiAn5cRi9ObeqeKYdJBZ13k_3z1GytiAf4Sn3czxWwNBm"
 ngrok.set_auth_token(NGROK_AUTHTOKEN)
 
 # =========================
