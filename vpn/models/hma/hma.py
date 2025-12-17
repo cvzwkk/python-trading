@@ -1,3 +1,7 @@
+# Install ngrok in Colab / local
+# !pip install pyngrok
+
+from pyngrok import ngrok
 import os
 import asyncio
 import aiohttp
@@ -13,10 +17,8 @@ import uvicorn
 
 nest_asyncio.apply()
 
-SCRIPT_START = datetime.now()
-
 # =========================
-# EXCHANGES (ORDERBOOK)
+# EXCHANGES & UTILS (same as before)
 # =========================
 ORDERBOOK_APIS = {
     "Coinbase": "https://api.exchange.coinbase.com/products/BTC-USD/book?level=2",
@@ -25,9 +27,6 @@ ORDERBOOK_APIS = {
     "Bitfinex": "https://api.bitfinex.com/v1/book/btcusd"
 }
 
-# =========================
-# UTILS
-# =========================
 def safe_return(v):
     return None if v is None or np.isnan(v) or np.isinf(v) else float(v)
 
@@ -38,7 +37,7 @@ def micro_price(bid, ask, bid_sz, ask_sz):
     return (ask * bid_sz + bid * ask_sz) / (bid_sz + ask_sz + 1e-8)
 
 # =========================
-# MODELS
+# MODELS (same as before)
 # =========================
 def predict_hma_robust(prices, period=16):
     if len(prices) < 4:
@@ -180,5 +179,13 @@ async def live_data():
         "exchanges": latest_results
     })
 
+# =========================
+# START NGROK & UVICORN
+# =========================
 if __name__ == "__main__":
-    uvicorn.run(app, host="8.219.86.42", port=8080)
+    # Start ngrok tunnel
+    public_url = ngrok.connect(8000, "http")
+    print(f"🚀 Public URL: {public_url}")
+
+    # Start FastAPI
+    uvicorn.run(app, host="0.0.0.0", port=8000)
