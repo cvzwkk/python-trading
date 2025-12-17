@@ -1,10 +1,11 @@
-
 import os
 import asyncio
 import aiohttp
 import numpy as np
+import pandas as pd
+import json
 from collections import deque
-from pykalman import KalmanFilter
+from datetime import datetime
 
 # =========================
 # EXCHANGES (ORDERBOOK)
@@ -15,6 +16,8 @@ ORDERBOOK_APIS = {
     "Bitstamp": "https://www.bitstamp.net/api/v2/order_book/btcusd/",
     "Bitfinex": "https://api.bitfinex.com/v1/book/btcusd"
 }
+
+BALANCE_FILE = "balance.json"
 
 # =========================
 # UTILS
@@ -28,6 +31,21 @@ def log_returns(prices):
 def micro_price(bid, ask, bid_sz, ask_sz):
     return (ask * bid_sz + bid * ask_sz) / (bid_sz + ask_sz + 1e-8)
 
+def save_trader_state(trader):
+    state = {
+        "balance": trader.balance,
+        "pnl": trader.pnl,
+        "positions": trader.positions
+    }
+    with open(BALANCE_FILE, "w") as f:
+        json.dump(state, f)
+
+def load_trader_state():
+    if os.path.exists(BALANCE_FILE):
+        with open(BALANCE_FILE, "r") as f:
+            return json.load(f)
+    return None
+
 # =========================
 # MODELS
 # =========================
@@ -35,49 +53,33 @@ def predict_lr(prices):
     n = len(prices)
     if n < 12:
         return None
-
     prices = np.array(prices, dtype=np.float64)
-
     logp = np.log(prices + 1e-9)
     r = np.diff(logp)
-
     alpha = 1.35
     fr = np.sign(r) * np.abs(r) ** alpha
-
     p = np.abs(fr) + 1e-12
     p /= p.sum()
-
     entropy = -np.sum(p * np.log(p))
     entropy_norm = entropy / np.log(len(p))
     entropy_weight = np.exp(-2.5 * entropy_norm)
-
     decay = np.exp(np.linspace(-4, 0, len(fr)))
     decay /= decay.sum()
-
     w = decay * entropy_weight
     w /= w.sum()
-
     velocity = np.sum(w * fr)
     acceleration = np.sum(w[:-1] * np.diff(fr))
-
     vol = np.std(r) + 1e-9
     vol_boost = np.tanh(vol * 80)
-
     drift = (velocity + 0.6 * acceleration) * (1 + vol_boost)
-
     z = (logp[-1] - logp.mean()) / (np.std(logp) + 1e-9)
     mr = np.tanh(-0.35 * z)
-
     final_drift = drift + mr * vol * 0.3
-
-    horizon = min(6, n // 3)
-    forecast_log = logp[-1] + final_drift * horizon
-
+    horizon = 60
+    forecast_log = logp[-1] + final_drift * horizon / max(1, n)
     return safe_return(np.exp(forecast_log))
 
-MODELS = {
-    "LR": predict_lr
-}
+MODELS = {"LR": predict_lr}
 
 # =========================
 # PAPER TRADER
@@ -87,6 +89,13 @@ class PaperTrader:
         self.balance = balance
         self.positions = {e: None for e in ORDERBOOK_APIS}
         self.pnl = {e: 0.0 for e in ORDERBOOK_APIS}
+
+        # Load saved state if exists
+        state = load_trader_state()
+        if state:
+            self.balance = state["balance"]
+            self.pnl = state["pnl"]
+            self.positions = state["positions"]
 
     def open_trade(self, ex, side, price):
         if self.positions[ex] is None:
@@ -110,28 +119,22 @@ async def fetch_price(ex, url, session):
     try:
         async with session.get(url, timeout=5) as r:
             d = await r.json()
-
             if ex == "Coinbase":
                 bid, bid_sz = map(float, d["bids"][0])
                 ask, ask_sz = map(float, d["asks"][0])
-
             elif ex == "Kraken":
                 book = list(d["result"].values())[0]
                 bid, bid_sz = map(float, book["bids"][0][:2])
                 ask, ask_sz = map(float, book["asks"][0][:2])
-
             elif ex == "Bitstamp":
                 bid, bid_sz = float(d["bids"][0][0]), float(d["bids"][0][1])
                 ask, ask_sz = float(d["asks"][0][0]), float(d["asks"][0][1])
-
-            else:
+            else:  # Bitfinex
                 bid = float(d["bids"][0]["price"])
                 bid_sz = float(d["bids"][0]["amount"])
                 ask = float(d["asks"][0]["price"])
                 ask_sz = float(d["asks"][0]["amount"])
-
             return ex, micro_price(bid, ask, bid_sz, ask_sz)
-
     except:
         return ex, None
 
@@ -140,7 +143,7 @@ async def fetch_price(ex, url, session):
 # =========================
 async def main():
     trader = PaperTrader()
-    history = {e: [] for e in ORDERBOOK_APIS}
+    history = {e: deque(maxlen=60) for e in ORDERBOOK_APIS}
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -148,50 +151,56 @@ async def main():
                 fetch_price(e, u, session) for e, u in ORDERBOOK_APIS.items()
             ])
 
-            os.system("cls" if os.name == "nt" else "clear")
-            print("🔵 BTC MICRO-PRICE (ORDERBOOK)\n")
-
+            data_rows = []
             for ex, price in results:
                 if price:
                     history[ex].append(price)
-                    history[ex] = history[ex][-60:]
-                    print(f"{ex:10}: ${price:,.2f}")
 
-            for ex, price in results:
-                if not price or len(history[ex]) < 15:
-                    continue
-
-                vol = np.std(log_returns(np.array(history[ex]))) + 1e-8
-                threshold = price * vol * (0.10 + 0.25 * np.tanh(vol * 50))
-
-                for model, fn in MODELS.items():
-                    pred = fn(history[ex])
-                    if pred is None:
-                        continue
+                    # Predict next 1-minute price
+                    pred = None
+                    if len(history[ex]) >= 12:
+                        pred = MODELS["LR"](list(history[ex]))
 
                     pos = trader.positions[ex]
+                    status = pos["side"].upper() if pos else None
 
-                    if pos is None:
-                        if pred > price + threshold:
-                            trader.open_trade(ex, "buy", price)
-                        elif pred < price - threshold:
-                            trader.open_trade(ex, "sell", price)
-                    else:
-                        if pos["side"] == "buy" and pred < price - threshold:
-                            trader.close_trade(ex, price)
-                        elif pos["side"] == "sell" and pred > price + threshold:
-                            trader.close_trade(ex, price)
+                    if pred is not None:
+                        vol = np.std(log_returns(np.array(history[ex]))) + 1e-8
+                        threshold = price * vol * 0.2
 
-            print("\n📊 PnL PER EXCHANGE")
-            for ex in ORDERBOOK_APIS:
-                pos = trader.positions[ex]
-                status = f" | OPEN {pos['side'].upper()}" if pos else ""
-                print(f"{ex:10}: ${trader.pnl[ex]:>8.2f}{status}")
+                        if pos is None:
+                            if pred > price + threshold:
+                                trader.open_trade(ex, "buy", price)
+                                status = "BUY"
+                            elif pred < price - threshold:
+                                trader.open_trade(ex, "sell", price)
+                                status = "SELL"
+                        else:
+                            if pos["side"] == "buy" and pred < price - threshold:
+                                trader.close_trade(ex, price)
+                                status = None
+                            elif pos["side"] == "sell" and pred > price + threshold:
+                                trader.close_trade(ex, price)
+                                status = None
 
-            print(
-                f"\n💰 Balance: ${trader.balance:,.2f} | "
-                f"Total PnL: ${trader.total_pnl():,.2f}"
-            )
+                    data_rows.append({
+                        "Exchange": ex,
+                        "Price": price,
+                        "Prediction_1min": pred,
+                        "Position": status,
+                        "PnL": trader.pnl[ex]
+                    })
+
+            df = pd.DataFrame(data_rows)
+            df["Balance"] = trader.balance
+            df["Total PnL"] = trader.total_pnl()
+
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"🔵 BTC MICRO-PRICE + 1-MIN PREDICTIONS ({datetime.now().strftime('%H:%M:%S')})\n")
+            display(df)
+
+            # Save trader state every second
+            save_trader_state(trader)
 
             await asyncio.sleep(1)
 
