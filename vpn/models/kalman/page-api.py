@@ -20,7 +20,7 @@ if NGROK_AUTH_TOKEN:
 conf.get_default().ngrok_port = NGROK_DASHBOARD_PORT
 
 # API endpoint to fetch live data
-API_URL = "https://tiesha-nonfissile-jarvis.ngrok-free.dev/live"
+API_URL = "https://tiesha-nonfissile-jarvis.ngrok-free.dev/kalman"
 
 # -----------------------------
 # FastAPI app
@@ -139,7 +139,7 @@ def home():
     return HTML_PAGE
 
 # Route for live API data
-@app.get("/data-kalman")
+@app.get("/data")
 def get_data():
     try:
         r = requests.get(API_URL, timeout=5)
