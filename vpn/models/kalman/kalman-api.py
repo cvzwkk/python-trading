@@ -201,7 +201,7 @@ async def update_prices():
 # =========================
 app = FastAPI(title="BTC Live Microprice API")
 
-@app.get("/live")
+@app.get("/kalman")
 async def live_data():
     trades = list(trader.trade_history)  # last 50 trades
     return JSONResponse({
