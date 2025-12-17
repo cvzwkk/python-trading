@@ -200,16 +200,20 @@ async def update_prices():
 # =========================
 # FASTAPI
 # =========================
+# =========================
+# FASTAPI APP
+# =========================
+app = FastAPI(title="BTC Live Microprice API")
+
 @app.get("/live")
 async def live_data():
-    # Convert deque to list for JSON serialization
-    trades = list(trader.trade_history)
+    trades = list(trader.trade_history)  # last 50 trades
     return JSONResponse({
         "timestamp": datetime.now().isoformat(),
         "balance": trader.balance,
         "total_pnl": trader.total_pnl(),
         "exchanges": latest_results,
-        "last_trades": trades  # <-- include last 50 trades here
+        "last_trades": trades
     })
 
 # =========================
