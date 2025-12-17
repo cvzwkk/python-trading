@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+l#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 # =========================
@@ -15,11 +15,19 @@ from fastapi.responses import JSONResponse
 from pyngrok import ngrok
 import uvicorn
 
-# =========================
-# NGROK AUTH (OPTIONAL)
-# =========================
-NGROK_AUTHTOKEN = "36xhpiAn5cRi9ObeqeKYdJBZ13k_3z1GytiAf4Sn3czxWwNBm"
-ngrok.set_auth_token(NGROK_AUTHTOKEN)
+# -----------------------------
+# CONFIGURE VARIABLES HERE
+# -----------------------------
+NGROK_AUTH_TOKEN = "36xkALQDnxGLwLU3o1CIo2SKsvt_7cUEHiQnMbNC2Snv5bfKk"  # <-- replace with your ngrok token
+NGROK_DASHBOARD_PORT = 4042                       # <-- change dashboard port if needed
+LOCAL_PORT = 8081 # <-- FastAPI server port
+
+# Set ngrok auth token
+if NGROK_AUTH_TOKEN:
+    conf.get_default().auth_token = NGROK_AUTH_TOKEN
+
+# Set ngrok dashboard port
+conf.get_default().ngrok_port = NGROK_DASHBOARD_PORT
 
 # =========================
 # EXCHANGES & UTILS
@@ -220,5 +228,14 @@ async def main():
     server = uvicorn.Server(config)
     await server.serve()
 
+# -----------------------------
+# Main
+# -----------------------------
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Open ngrok tunnel (HTTP) on LOCAL_PORT, dashboard on NGROK_DASHBOARD_PORT
+    public_url = ngrok.connect(addr=LOCAL_PORT, bind_tls=True)
+    print(f"Public URL: {public_url}")
+    print(f"Ngrok dashboard port: {NGROK_DASHBOARD_PORT}")
+
+    # Run FastAPI server
+    uvicorn.run(app, host="0.0.0.0", port=LOCAL_PORT)
