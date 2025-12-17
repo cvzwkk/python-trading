@@ -1,21 +1,30 @@
-# live_table_ngrok_port.py
+# live_table_ngrok_fixed.py
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import requests
 from pyngrok import ngrok, conf
 import uvicorn
 
-# --- User Input for Ngrok Key ---
-NGROK_AUTH_TOKEN = "36xkALQDnxGLwLU3o1CIo2SKsvt_7cUEHiQnMbNC2Snv5bfKk"
+# -----------------------------
+# CONFIGURE VARIABLES HERE
+# -----------------------------
+NGROK_AUTH_TOKEN = "36xkALQDnxGLwLU3o1CIo2SKsvt_7cUEHiQnMbNC2Snv5bfKk"  # <-- replace with your ngrok token
+NGROK_DASHBOARD_PORT = 4041                       # <-- change dashboard port if needed
+LOCAL_PORT = 8080 # <-- FastAPI server port
 
-# --- Set ngrok dashboard port (default is 4040) ---
-NGROK_DASHBOARD_PORT =  "4041"
+# Set ngrok auth token
+if NGROK_AUTH_TOKEN:
+    conf.get_default().auth_token = NGROK_AUTH_TOKEN
+
+# Set ngrok dashboard port
 conf.get_default().ngrok_port = NGROK_DASHBOARD_PORT
 
-# Your API endpoint
+# API endpoint to fetch live data
 API_URL = "https://tiesha-nonfissile-jarvis.ngrok-free.dev/live"
 
+# -----------------------------
 # FastAPI app
+# -----------------------------
 app = FastAPI()
 
 # HTML page with live-updating table
@@ -101,11 +110,14 @@ def get_data():
     except:
         return {"timestamp":"-", "balance":0, "total_pnl":0, "exchanges":{}}
 
+# -----------------------------
+# Main
+# -----------------------------
 if __name__ == "__main__":
-    # Open ngrok tunnel (HTTP) on port 8000, dashboard on custom port
-    public_url = ngrok.connect(addr=8000, bind_tls=True)
+    # Open ngrok tunnel (HTTP) on LOCAL_PORT, dashboard on NGROK_DASHBOARD_PORT
+    public_url = ngrok.connect(addr=LOCAL_PORT, bind_tls=True)
     print(f"Public URL: {public_url}")
     print(f"Ngrok dashboard port: {NGROK_DASHBOARD_PORT}")
 
     # Run FastAPI server
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=LOCAL_PORT)
