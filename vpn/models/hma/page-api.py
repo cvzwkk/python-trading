@@ -8,7 +8,7 @@ import uvicorn
 # -----------------------------
 # CONFIGURE VARIABLES HERE
 # -----------------------------
-NGROK_AUTH_TOKEN = "36xkALQDnxGLwLU3o1CIo2SKsvt_7cUEHiQnMbNC2Snv5bfKk"  # <-- replace with your ngrok token
+NGROK_AUTH_TOKEN = "Ngrok auth key"  # <-- replace with your ngrok token
 NGROK_DASHBOARD_PORT = 4041                       # <-- change dashboard port if needed
 LOCAL_PORT = 8080 # <-- FastAPI server port
 
