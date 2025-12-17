@@ -13,6 +13,7 @@ from datetime import datetime
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pyngrok import ngrok
+from pykalman import KalmanFilter
 import uvicorn
 
 # -----------------------------
@@ -55,10 +56,10 @@ def predict_hma_robust(prices, period=16):
 # =========================
 # KALMAN MODEL
 # =========================
-from pykalman import KalmanFilter
+
 
 def predict_kalman(prices):
-    if len(prices) < 6:
+    if len(prices)l < 6:
         return None
     kf = KalmanFilter(
         transition_matrices=[1],
