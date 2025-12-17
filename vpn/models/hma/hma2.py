@@ -1,4 +1,3 @@
-make one function that when the balance is negative - the trades stop and no more entries are maded until script restart
 
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
