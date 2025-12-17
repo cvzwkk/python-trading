@@ -7,6 +7,10 @@ import json
 from collections import deque
 from datetime import datetime
 
+import nest_asyncio
+nest_asyncio.apply()
+
+
 # =========================
 # EXCHANGES (ORDERBOOK)
 # =========================
@@ -204,5 +208,7 @@ async def main():
 
             await asyncio.sleep(1)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# ... all your code above remains the same ...
+
+# At the bottom of the notebook cell
+await main()
