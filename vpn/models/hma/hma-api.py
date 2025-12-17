@@ -78,15 +78,29 @@ MODELS = {"HMA": predict_hma_robust}
 # =========================
 # PAPER TRADER
 # =========================
+# =========================
+# PAPER TRADER (with trade history)
+# =========================
+from collections import deque
+
 class PaperTrader:
     def __init__(self, balance=1000):
         self.balance = balance
         self.positions = {e: None for e in ORDERBOOK_APIS}
         self.pnl = {e: 0.0 for e in ORDERBOOK_APIS}
+        self.trade_history = deque(maxlen=50)  # last 50 trades
 
     def open_trade(self, ex, side, price, size=1.0):
         if self.positions[ex] is None:
             self.positions[ex] = {"side": side, "entry": price, "size": size}
+            self.trade_history.append({
+                "exchange": ex,
+                "type": "ENTRY",
+                "side": side.upper(),
+                "price": price,
+                "pnl": None,
+                "time": datetime.now().strftime("%H:%M:%S")
+            })
 
     def close_trade(self, ex, price):
         p = self.positions[ex]
@@ -96,9 +110,18 @@ class PaperTrader:
             self.balance += pnl
             self.pnl[ex] += pnl
             self.positions[ex] = None
+            self.trade_history.append({
+                "exchange": ex,
+                "type": "EXIT",
+                "side": p["side"].upper(),
+                "price": price,
+                "pnl": pnl,
+                "time": datetime.now().strftime("%H:%M:%S")
+            })
 
     def total_pnl(self):
         return sum(self.pnl.values())
+
 
 # =========================
 # FETCH ORDERBOOK
@@ -177,15 +200,16 @@ async def update_prices():
 # =========================
 # FASTAPI
 # =========================
-app = FastAPI(title="BTC Live Microprice API")
-
 @app.get("/live")
 async def live_data():
+    # Convert deque to list for JSON serialization
+    trades = list(trader.trade_history)
     return JSONResponse({
         "timestamp": datetime.now().isoformat(),
         "balance": trader.balance,
         "total_pnl": trader.total_pnl(),
-        "exchanges": latest_results
+        "exchanges": latest_results,
+        "last_trades": trades  # <-- include last 50 trades here
     })
 
 # =========================
