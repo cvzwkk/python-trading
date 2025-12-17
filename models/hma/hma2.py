@@ -1,4 +1,5 @@
 
+
 import os
 import asyncio
 import aiohttp
@@ -10,6 +11,16 @@ from datetime import datetime
 
 import nest_asyncio
 nest_asyncio.apply()
+
+import time
+
+SCRIPT_START = time.time()
+
+def format_elapsed(seconds):
+    hrs = int(seconds // 3600)
+    mins = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    return f"{hrs:02d}:{mins:02d}:{secs:02d}"
 
 # =========================
 # EXCHANGES (ORDERBOOK)
@@ -251,7 +262,8 @@ async def main():
                     print(f"{ex:10} | Price: {price:10.2f} | Pred: {pred if pred else 'waiting':10} | "
                           f"Pos: {status:5} | PnL: {trader.pnl[ex]:10.2f}")
 
-            print(f"\nBalance: {trader.balance:.2f} | Total PnL: {trader.total_pnl():.2f}")
+            elapsed = format_elapsed(time.time() - SCRIPT_START)
+            print(f"\nBalance: {trader.balance:.2f} | Total PnL: {trader.total_pnl():.2f} | Runtime: {elapsed}")
 
             save_trader_state(trader)
             await asyncio.sleep(1)
