@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+from pykalman import KalmanFilter
 import asyncio
 import aiohttp
 import numpy as np
@@ -136,7 +136,7 @@ async def update_prices():
             for ex, price in results:
                 if price is not None:
                     history[ex].append(price)
-                    pred = MODELS["HMA"](list(history[ex])) if len(history[ex]) >= 12 else None
+                    pred = MODELS["Kalman"](list(history[ex])) if len(history[ex]) >= 6 else None
                     pos = trader.positions[ex]
                     status = pos["side"].upper() if pos else "-"
                     if pred is not None:
