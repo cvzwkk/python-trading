@@ -189,7 +189,7 @@ async def main():
 
     # Serveo SSH tunnel
     print("🌐 Starting Serveo tunnel...")
-    subprocess.Popen(["ssh", "-o", "StrictHostKeyChecking=no", "-R", "80:localhost:8001", "serveo.net"])
+    subprocess.Popen(["ssh", "-o", "StrictHostKeyChecking=no", "-R", "80:localhost:8001", "cvzwk.kalman.serveo.net"])
 
     # start uvicorn
     config = uvicorn.Config(app=app, host="0.0.0.0", port=8001, log_level="info")
