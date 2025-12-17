@@ -34,7 +34,7 @@ HTML_PAGE = """
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Live Trading Table</title>
+<title>Hull Live Trading Table</title>
 <style>
   body { font-family: Arial; margin: 20px; }
   table { border-collapse: collapse; width: 100%; margin-bottom: 30px; }
