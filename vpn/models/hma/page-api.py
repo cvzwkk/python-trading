@@ -28,6 +28,7 @@ API_URL = "https://tiesha-nonfissile-jarvis.ngrok-free.dev/live"
 app = FastAPI()
 
 # HTML page with live-updating table
+# HTML page with live-updating table and trades history
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -36,7 +37,7 @@ HTML_PAGE = """
 <title>Live Trading Table</title>
 <style>
   body { font-family: Arial; margin: 20px; }
-  table { border-collapse: collapse; width: 100%; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 30px; }
   th, td { border: 1px solid #ccc; padding: 8px; text-align: center; }
   th { background-color: #f4f4f4; }
   .negative { color: red; }
@@ -47,6 +48,8 @@ HTML_PAGE = """
 <h2>Live Trading Data</h2>
 <p>Last updated: <span id="timestamp">-</span></p>
 <p>Balance: <span id="balance">-</span> | Total PnL: <span id="total_pnl">-</span></p>
+
+<!-- Current Trades Table -->
 <table id="liveTable">
   <thead>
     <tr>
@@ -60,31 +63,65 @@ HTML_PAGE = """
   <tbody></tbody>
 </table>
 
+<h2>Last 50 Trades</h2>
+<table id="tradeHistoryTable">
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Exchange</th>
+      <th>Type</th>
+      <th>Side</th>
+      <th>Price</th>
+      <th>PnL</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
 <script>
 async function updateTable() {
   try {
     const res = await fetch('/data');
     const data = await res.json();
 
+    // Update main panel
     document.getElementById('timestamp').textContent = data.timestamp;
     document.getElementById('balance').textContent = data.balance.toFixed(2);
     document.getElementById('total_pnl').textContent = data.total_pnl.toFixed(2);
     document.getElementById('total_pnl').className = data.total_pnl >= 0 ? 'positive' : 'negative';
 
+    // Update current trades table
     const tbody = document.querySelector('#liveTable tbody');
     tbody.innerHTML = '';
-
     for (const [exchange, info] of Object.entries(data.exchanges)) {
       const row = document.createElement('tr');
       row.innerHTML = `
         <td>${exchange}</td>
         <td>${info.price.toFixed(2)}</td>
-        <td>${info.prediction.toFixed(2)}</td>
+        <td>${info.prediction ? info.prediction.toFixed(2) : '-'}</td>
         <td>${info.position}</td>
         <td class="${info.pnl >= 0 ? 'positive' : 'negative'}">${info.pnl.toFixed(6)}</td>
       `;
       tbody.appendChild(row);
     }
+
+    // Update trade history table
+    const thBody = document.querySelector('#tradeHistoryTable tbody');
+    thBody.innerHTML = '';
+    for (const trade of data.last_trades) {
+      const row = document.createElement('tr');
+      const pnlStr = trade.pnl !== null ? trade.pnl.toFixed(6) : '-';
+      row.innerHTML = `
+        <td>${trade.time}</td>
+        <td>${trade.exchange}</td>
+        <td>${trade.type}</td>
+        <td>${trade.side}</td>
+        <td>${trade.price.toFixed(2)}</td>
+        <td class="${trade.pnl >= 0 ? 'positive' : 'negative'}">${pnlStr}</td>
+      `;
+      thBody.appendChild(row);
+    }
+
   } catch(err) { console.error(err); }
 }
 
